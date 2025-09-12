@@ -1,22 +1,45 @@
+# NetApp ONTAP Cluster Configuration
 cluster_management_ip = "10.0.0.1"
 cluster_admin_user    = "admin"
-svm_name             = "svm01"
+# Set cluster_admin_password via: export TF_VAR_cluster_admin_password="your-password"
 
-lif1_name            = "lif01"
-lif1_ip              = "192.168.1.101"
-lif1_home_node       = "ontap-node1"
-lif1_home_port       = "e0c"
+# SVM Configuration
+create_svm   = false    # Set to true to create new SVM
+svm_name     = "svm01"
+svm_comment  = "CIFS SVM managed by Terraform"
 
-lif2_name            = "lif02"
-lif2_ip              = "192.168.1.102"
-lif2_home_node       = "ontap-node2"
-lif2_home_port       = "e0d"
+# Network Interfaces (LIFs)
+lifs = {
+  lif01 = {
+    ip_address = "192.168.1.101"
+    netmask    = "255.255.255.0"
+    home_node  = "ontap-node1"
+    home_port  = "e0c"
+  }
+  lif02 = {
+    ip_address = "192.168.1.102"
+    netmask    = "255.255.255.0"
+    home_node  = "ontap-node2"
+    home_port  = "e0d"
+  }
+}
 
-domain_admin_user    = "admin@example.com"
-cifs_server          = "CIFS-SERVER01"
-domain_fqdn          = "example.com"
-organizational_unit  = "OU=Storage,DC=example,DC=com"
+# CIFS Configuration
+enable_cifs         = true
+domain_admin_user   = "admin@example.com"
+cifs_server_name    = "CIFS-SERVER01"
+domain_fqdn         = "example.com"
+organizational_unit = "OU=Storage,DC=example,DC=com"
+domain_join_user    = "joinuser@example.com"
+dns_servers         = ["8.8.8.8", "8.8.4.4"]
 
-domain_join_user     = "joinuser@example.com"
+# Set passwords via environment variables:
+# export TF_VAR_domain_admin_password="your-domain-admin-password"
+# export TF_VAR_domain_join_password="your-domain-join-password"
 
-dns_servers          = ["8.8.8.8", "8.8.4.4"]
+# Resource Tags
+tags = {
+  Environment = "development"
+  Team        = "infrastructure"
+  ManagedBy   = "terraform"
+}
