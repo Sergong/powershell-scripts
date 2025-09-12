@@ -62,8 +62,3 @@ variable "location" {
   default = null
 }
 
-variable "tags" {
-  description = "Tags to apply to the LIF for organization"
-  type        = map(string)
-  default     = {}
-}

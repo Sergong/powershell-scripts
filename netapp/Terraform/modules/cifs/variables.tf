@@ -113,8 +113,3 @@ variable "svm_dependency" {
   default     = null
 }
 
-variable "tags" {
-  description = "Tags to apply to CIFS resources"
-  type        = map(string)
-  default     = {}
-}

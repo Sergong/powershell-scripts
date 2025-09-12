@@ -86,8 +86,3 @@ variable "root_volume_snapshot_policy" {
   default     = "default"
 }
 
-variable "tags" {
-  description = "Tags to apply to the SVM"
-  type        = map(string)
-  default     = {}
-}

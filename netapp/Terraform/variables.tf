@@ -257,7 +257,7 @@ variable "cifs_shares" {
 # =============================================================================
 
 variable "tags" {
-  description = "Tags to apply to all resources"
+  description = "Tags for organizational purposes and output metadata (NetApp ONTAP provider does not support resource tagging)"
   type        = map(string)
   default     = {}
 }

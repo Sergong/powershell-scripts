@@ -24,7 +24,6 @@ module "svm" {
   root_volume_size             = var.root_volume_size
   root_volume_security_style   = var.root_volume_security_style
   root_volume_snapshot_policy  = var.root_volume_snapshot_policy
-  tags                         = var.tags
 }
 
 # Create LIFs
@@ -42,7 +41,6 @@ module "lifs" {
   service_policy = each.value.service_policy
   admin_status   = lookup(each.value, "admin_status", "up")
   location       = lookup(each.value, "location", null)
-  tags           = var.tags
 
   depends_on = [module.svm]
 }
@@ -66,7 +64,6 @@ module "cifs" {
   security_settings      = var.cifs_security_settings
   cifs_shares            = var.cifs_shares
   svm_dependency         = var.create_svm ? module.svm[0] : null
-  tags                   = var.tags
 
   depends_on = [module.svm, module.lifs]
 }
