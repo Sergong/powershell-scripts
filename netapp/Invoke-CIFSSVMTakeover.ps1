@@ -27,15 +27,29 @@
     
 .PARAMETER SourceLIFNames
     Array of source LIF names whose IPs will be migrated
+    If not specified, script will auto-discover CIFS LIFs on source SVM
     
 .PARAMETER TargetLIFNames
     Array of target LIF names that will receive the migrated IPs
+    If not specified, script will auto-discover CIFS LIFs on target SVM
+    Must have same number of LIFs as source (1:1 mapping)
     
 .PARAMETER WhatIf
     Show what would be changed without making modifications
     
 .PARAMETER ForceSourceDisable
     Force disable source CIFS server even if sessions are active
+    
+.PARAMETER SnapMirrorVolumes
+    Array of volume names that have SnapMirror relationships to break before cutover
+    If not specified, script will auto-discover active SnapMirror volumes on target SVM
+    
+.PARAMETER SkipSnapMirrorBreak
+    Skip SnapMirror break operations (use if already broken manually)
+    
+.PARAMETER ExportPath
+    Path to the CIFS export directory for volume validation (optional)
+    If specified, will validate discovered volumes against exported share data
 #>
 
 param(
@@ -57,17 +71,26 @@ param(
     [Parameter(Mandatory=$false)]
     [PSCredential]$TargetCredential,
     
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory=$false)]
     [string[]]$SourceLIFNames,
     
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory=$false)]
     [string[]]$TargetLIFNames,
     
     [Parameter(Mandatory=$false)]
     [switch]$WhatIf,
     
     [Parameter(Mandatory=$false)]
-    [switch]$ForceSourceDisable
+    [switch]$ForceSourceDisable,
+    
+    [Parameter(Mandatory=$false)]
+    [string[]]$SnapMirrorVolumes,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$SkipSnapMirrorBreak,
+    
+    [Parameter(Mandatory=$false)]
+    [string]$ExportPath
 )
 
 # Import NetApp PowerShell Toolkit
@@ -79,24 +102,31 @@ try {
     exit 1
 }
 
-# Validate LIF arrays
-if ($SourceLIFNames.Count -ne $TargetLIFNames.Count) {
-    Write-Error "Source and Target LIF arrays must have the same number of elements"
-    exit 1
-}
-
-if ($SourceLIFNames.Count -ne 2) {
-    Write-Error "This script is designed to migrate exactly 2 LIFs"
-    exit 1
-}
+# LIF validation will be done after auto-discovery
 
 # Get credentials if not provided
 if (-not $SourceCredential) {
-    $SourceCredential = Get-Credential -Message "Enter credentials for SOURCE cluster: $SourceCluster"
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        # PowerShell 7 compatible credential input
+        $Username = Read-Host "Enter username for SOURCE cluster: $SourceCluster"
+        $SecurePassword = Read-Host "Enter password" -AsSecureString
+        $SourceCredential = New-Object System.Management.Automation.PSCredential($Username, $SecurePassword)
+    } else {
+        # Windows PowerShell
+        $SourceCredential = Get-Credential -Message "Enter credentials for SOURCE cluster: $SourceCluster"
+    }
 }
 
 if (-not $TargetCredential) {
-    $TargetCredential = Get-Credential -Message "Enter credentials for TARGET cluster: $TargetCluster"
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        # PowerShell 7 compatible credential input
+        $Username = Read-Host "Enter username for TARGET cluster: $TargetCluster"
+        $SecurePassword = Read-Host "Enter password" -AsSecureString
+        $TargetCredential = New-Object System.Management.Automation.PSCredential($Username, $SecurePassword)
+    } else {
+        # Windows PowerShell
+        $TargetCredential = Get-Credential -Message "Enter credentials for TARGET cluster: $TargetCluster"
+    }
 }
 
 # Initialize logging
@@ -111,9 +141,23 @@ function Write-Log {
 Write-Log "=== CIFS SVM Takeover and LIF Migration Started ==="
 Write-Log "Source: $SourceCluster -> $SourceSVM"
 Write-Log "Target: $TargetCluster -> $TargetSVM"
-Write-Log "LIF Migration Mappings:"
-for ($i = 0; $i -lt $SourceLIFNames.Count; $i++) {
-    Write-Log "  $($SourceLIFNames[$i]) -> $($TargetLIFNames[$i])"
+
+if ($SourceLIFNames -and $TargetLIFNames) {
+    Write-Log "LIF Migration (specified):"
+    for ($i = 0; $i -lt $SourceLIFNames.Count; $i++) {
+        Write-Log "  $($SourceLIFNames[$i]) -> $($TargetLIFNames[$i])"
+    }
+} else {
+    Write-Log "LIF Migration: Will auto-discover CIFS LIFs"
+}
+
+if ($SnapMirrorVolumes -and $SnapMirrorVolumes.Count -gt 0) {
+    Write-Log "SnapMirror Volumes (specified): $($SnapMirrorVolumes -join ', ')"
+} elseif (!$SkipSnapMirrorBreak) {
+    Write-Log "SnapMirror Volumes: Will auto-discover from target SVM"
+}
+if ($ExportPath) {
+    Write-Log "Export Path: $ExportPath (will validate discovered volumes)"
 }
 
 # Variables to store connection objects
@@ -123,6 +167,14 @@ $TargetController = $null
 # Variables to store LIF information
 $SourceLIFInfo = @()
 $TargetLIFInfo = @()
+
+# Variables for SnapMirror auto-discovery
+$DiscoveredSnapMirrorVolumes = @()
+$ExportedShareVolumes = @()
+
+# Variables for LIF auto-discovery
+$DiscoveredSourceLIFs = @()
+$DiscoveredTargetLIFs = @()
 
 try {
     # Step 1: Connect to source cluster
@@ -141,7 +193,162 @@ try {
     }
     Write-Log "[OK] Connected to target cluster successfully"
 
-    # Step 3: Collect source LIF information
+    # Step 3: Auto-discover CIFS LIFs (if not specified)
+    if ((!$SourceLIFNames -or $SourceLIFNames.Count -eq 0) -or (!$TargetLIFNames -or $TargetLIFNames.Count -eq 0)) {
+        Write-Log "Auto-discovering CIFS LIFs..."
+        
+        # Discover source CIFS LIFs
+        if (!$SourceLIFNames -or $SourceLIFNames.Count -eq 0) {
+            Write-Log "Discovering CIFS LIFs on source SVM: $SourceSVM"
+            try {
+                $AllSourceLIFs = Get-NcNetInterface -Controller $SourceController -VserverContext $SourceSVM
+                $CifsSourceLIFs = $AllSourceLIFs | Where-Object {
+                    $_.DataProtocols -contains "cifs" -and 
+                    $_.AdministrativeStatus -eq "up" -and
+                    $_.Role -eq "data"
+                }
+                
+                if ($CifsSourceLIFs) {
+                    $DiscoveredSourceLIFs = $CifsSourceLIFs | Sort-Object InterfaceName
+                    $SourceLIFNames = $DiscoveredSourceLIFs | ForEach-Object { $_.InterfaceName }
+                    Write-Log "[OK] Discovered $($SourceLIFNames.Count) CIFS LIFs on source SVM:"
+                    foreach ($LIF in $DiscoveredSourceLIFs) {
+                        Write-Log "  - $($LIF.InterfaceName): $($LIF.Address) (Node: $($LIF.CurrentNode))"
+                    }
+                } else {
+                    throw "No active CIFS LIFs found on source SVM: $SourceSVM"
+                }
+            } catch {
+                Write-Log "[NOK] Failed to discover source CIFS LIFs: $($_.Exception.Message)" "ERROR"
+                throw
+            }
+        }
+        
+        # Discover target CIFS LIFs
+        if (!$TargetLIFNames -or $TargetLIFNames.Count -eq 0) {
+            Write-Log "Discovering CIFS LIFs on target SVM: $TargetSVM"
+            try {
+                $AllTargetLIFs = Get-NcNetInterface -Controller $TargetController -VserverContext $TargetSVM
+                $CifsTargetLIFs = $AllTargetLIFs | Where-Object {
+                    $_.DataProtocols -contains "cifs" -and 
+                    $_.Role -eq "data"
+                }
+                
+                if ($CifsTargetLIFs) {
+                    $DiscoveredTargetLIFs = $CifsTargetLIFs | Sort-Object InterfaceName
+                    $TargetLIFNames = $DiscoveredTargetLIFs | ForEach-Object { $_.InterfaceName }
+                    Write-Log "[OK] Discovered $($TargetLIFNames.Count) CIFS LIFs on target SVM:"
+                    foreach ($LIF in $DiscoveredTargetLIFs) {
+                        Write-Log "  - $($LIF.InterfaceName): $($LIF.Address) (Node: $($LIF.CurrentNode), Status: $($LIF.AdministrativeStatus))"
+                    }
+                } else {
+                    throw "No CIFS LIFs found on target SVM: $TargetSVM"
+                }
+            } catch {
+                Write-Log "[NOK] Failed to discover target CIFS LIFs: $($_.Exception.Message)" "ERROR"
+                throw
+            }
+        }
+    }
+    
+    # Step 4: Validate LIF mappings
+    if ($SourceLIFNames.Count -ne $TargetLIFNames.Count) {
+        Write-Log "[NOK] Mismatch in LIF counts: Source has $($SourceLIFNames.Count) LIFs, Target has $($TargetLIFNames.Count) LIFs" "ERROR"
+        throw "Source and Target must have the same number of CIFS LIFs for 1:1 migration"
+    }
+    
+    Write-Log "[OK] LIF validation complete - will migrate $($SourceLIFNames.Count) LIF(s)"
+    Write-Log "Final LIF migration mappings:"
+    for ($i = 0; $i -lt $SourceLIFNames.Count; $i++) {
+        Write-Log "  $($SourceLIFNames[$i]) -> $($TargetLIFNames[$i])"
+    }
+
+    # Step 5: Auto-discover SnapMirror volumes (if not specified)
+    if ((!$SnapMirrorVolumes -or $SnapMirrorVolumes.Count -eq 0) -and !$SkipSnapMirrorBreak) {
+        Write-Log "Auto-discovering SnapMirror volumes on target SVM..."
+        
+        try {
+            # Get all SnapMirror relationships where target SVM matches
+            $AllSnapMirrors = Get-NcSnapmirror -Controller $TargetController | Where-Object {
+                $_.Destination -like "${TargetSVM}:*" -and $_.Status -ne "Broken-off"
+            }
+            
+            if ($AllSnapMirrors) {
+                foreach ($SM in $AllSnapMirrors) {
+                    # Extract volume name from destination path (format: svm:volume)
+                    $VolumeName = ($SM.Destination -split ':')[1]
+                    if ($VolumeName -and $DiscoveredSnapMirrorVolumes -notcontains $VolumeName) {
+                        $DiscoveredSnapMirrorVolumes += $VolumeName
+                        Write-Log "[OK] Found SnapMirror volume: $VolumeName (Status: $($SM.Status))"
+                    }
+                }
+                
+                Write-Log "[OK] Auto-discovered $($DiscoveredSnapMirrorVolumes.Count) SnapMirror volumes"
+                $SnapMirrorVolumes = $DiscoveredSnapMirrorVolumes
+            } else {
+                Write-Log "[NOK] No active SnapMirror relationships found on target SVM" "WARNING"
+            }
+        } catch {
+            Write-Log "[NOK] Failed to discover SnapMirror volumes: $($_.Exception.Message)" "ERROR"
+        }
+    }
+    
+    # Step 6: Load and validate export data (if provided)
+    if ($ExportPath -and (Test-Path $ExportPath)) {
+        Write-Log "Loading export data for volume validation..."
+        
+        try {
+            # Try to load share volumes from export
+            $ShareVolumesFile = Join-Path $ExportPath "Share-Volumes.json"
+            if (Test-Path $ShareVolumesFile) {
+                $ShareVolumesData = Get-Content -Path $ShareVolumesFile | ConvertFrom-Json
+                $ExportedShareVolumes = $ShareVolumesData.Volumes
+                Write-Log "[OK] Loaded $($ExportedShareVolumes.Count) volumes from export data"
+                Write-Log "  Export volumes: $($ExportedShareVolumes -join ', ')"
+                
+                # Validate discovered SnapMirror volumes against export data
+                if ($SnapMirrorVolumes -and $SnapMirrorVolumes.Count -gt 0) {
+                    Write-Log "Validating SnapMirror volumes against exported share data..."
+                    
+                    # Check if all SnapMirror volumes are in the export
+                    $MissingInExport = $SnapMirrorVolumes | Where-Object { $_ -notin $ExportedShareVolumes }
+                    if ($MissingInExport) {
+                        Write-Log "[NOK] SnapMirror volumes not found in export data: $($MissingInExport -join ', ')" "WARNING"
+                        Write-Log "  These volumes may not be used by CIFS shares"
+                    }
+                    
+                    # Check if all export volumes have SnapMirror relationships
+                    $MissingSnapMirrors = $ExportedShareVolumes | Where-Object { $_ -notin $SnapMirrorVolumes }
+                    if ($MissingSnapMirrors) {
+                        Write-Log "[NOK] Export volumes without SnapMirror relationships: $($MissingSnapMirrors -join ', ')" "WARNING"
+                        Write-Log "  These volumes may need manual verification"
+                    }
+                    
+                    # Show validation summary
+                    $MatchingVolumes = $SnapMirrorVolumes | Where-Object { $_ -in $ExportedShareVolumes }
+                    Write-Log "[OK] Volume validation complete:"
+                    Write-Log "  - Matching volumes (SM + Export): $($MatchingVolumes.Count)"
+                    Write-Log "  - SnapMirror only: $($MissingInExport.Count)"
+                    Write-Log "  - Export only: $($MissingSnapMirrors.Count)"
+                }
+            } else {
+                Write-Log "[NOK] Share volumes file not found in export: $ShareVolumesFile" "WARNING"
+            }
+        } catch {
+            Write-Log "[NOK] Failed to load export data: $($_.Exception.Message)" "WARNING"
+        }
+    } elseif ($ExportPath) {
+        Write-Log "[NOK] Export path specified but not found: $ExportPath" "WARNING"
+    }
+    
+    # Step 7: Display final SnapMirror volume list
+    if ($SnapMirrorVolumes -and $SnapMirrorVolumes.Count -gt 0) {
+        Write-Log "Final SnapMirror volumes to process: $($SnapMirrorVolumes -join ', ')"
+    } elseif (!$SkipSnapMirrorBreak) {
+        Write-Log "[NOK] No SnapMirror volumes identified - continuing without SnapMirror operations" "WARNING"
+    }
+
+    # Step 8: Collect source LIF information
     Write-Log "Collecting source LIF information..."
     foreach ($LifName in $SourceLIFNames) {
         try {
@@ -172,7 +379,7 @@ try {
         }
     }
 
-    # Step 4: Collect target LIF information
+    # Step 9: Collect target LIF information
     Write-Log "Collecting target LIF information..."
     foreach ($LifName in $TargetLIFNames) {
         try {
@@ -203,7 +410,7 @@ try {
         }
     }
 
-    # Step 5: Display migration plan
+    # Step 10: Display migration plan
     Write-Log "=== IP Migration Plan ==="
     for ($i = 0; $i -lt $SourceLIFInfo.Count; $i++) {
         $SourceLIF = $SourceLIFInfo[$i]
@@ -213,7 +420,71 @@ try {
         Write-Log "  Target: $($TargetLIF.Name) ($($TargetLIF.IPAddress)/$($TargetLIF.NetmaskLength)) -> ($($SourceLIF.IPAddress)/$($SourceLIF.NetmaskLength))"
     }
 
-    # Step 6: Check for active CIFS sessions on source SVM
+    # Step 11: Break SnapMirror relationships (if specified)
+    if ($SnapMirrorVolumes -and $SnapMirrorVolumes.Count -gt 0 -and !$SkipSnapMirrorBreak) {
+        Write-Log "Breaking SnapMirror relationships before cutover..."
+        
+        foreach ($VolumeName in $SnapMirrorVolumes) {
+            $DestinationPath = "${TargetSVM}:$VolumeName"
+            Write-Log "Processing SnapMirror for volume: $VolumeName"
+            
+            if (!$WhatIf) {
+                try {
+                    # Check current SnapMirror status
+                    $SMRelation = Get-NcSnapmirror -Controller $TargetController -Destination $DestinationPath -ErrorAction SilentlyContinue
+                    
+                    if ($SMRelation) {
+                        Write-Log "Found SnapMirror: $($SMRelation.Source) -> $($SMRelation.Destination)"
+                        Write-Log "Current Status: $($SMRelation.Status)"
+                        
+                        if ($SMRelation.Status -ne "Broken-off") {
+                            # Quiesce the relationship first
+                            Write-Log "Quiescing SnapMirror: $DestinationPath"
+                            Invoke-NcSnapmirrorQuiesce -Controller $TargetController -Destination $DestinationPath
+                            
+                            # Wait for quiesce to complete
+                            Write-Log "Waiting for quiesce to complete..."
+                            do {
+                                Start-Sleep -Seconds 10
+                                $SMStatus = Get-NcSnapmirror -Controller $TargetController -Destination $DestinationPath
+                                Write-Log "  Status: $($SMStatus.Status)"
+                            } while ($SMStatus.Status -eq "Quiescing")
+                            
+                            # Break the relationship
+                            Write-Log "Breaking SnapMirror: $DestinationPath"
+                            Invoke-NcSnapmirrorBreak -Controller $TargetController -Destination $DestinationPath
+                            
+                            # Verify break was successful
+                            Start-Sleep -Seconds 5
+                            $SMFinal = Get-NcSnapmirror -Controller $TargetController -Destination $DestinationPath
+                            Write-Log "[OK] SnapMirror broken successfully: $($SMFinal.Status)"
+                            
+                        } else {
+                            Write-Log "[OK] SnapMirror already broken: $DestinationPath"
+                        }
+                    } else {
+                        Write-Log "[NOK] No SnapMirror relationship found for: $DestinationPath" "WARNING"
+                    }
+                    
+                } catch {
+                    Write-Log "[NOK] Failed to break SnapMirror for $DestinationPath`: $($_.Exception.Message)" "ERROR"
+                    if (!$ForceSourceDisable) {
+                        throw "SnapMirror break failed. Use -ForceSourceDisable to continue anyway."
+                    }
+                }
+            } else {
+                Write-Log "[WHATIF] Would quiesce and break SnapMirror: $DestinationPath"
+            }
+        }
+        
+        Write-Log "[OK] SnapMirror break operations completed"
+    } elseif ($SkipSnapMirrorBreak) {
+        Write-Log "Skipping SnapMirror operations as requested"
+    } else {
+        Write-Log "No SnapMirror volumes specified - continuing without SnapMirror operations"
+    }
+
+    # Step 12: Check for active CIFS sessions on source SVM
     Write-Log "Checking for active CIFS sessions on source SVM..."
     try {
         $ActiveSessions = Get-NcCifsSession -Controller $SourceController -VserverContext $SourceSVM
@@ -245,7 +516,7 @@ try {
         Write-Log "[NOK] Could not check CIFS sessions: $($_.Exception.Message)" "WARNING"
     }
 
-    # Step 7: Disable CIFS server on source SVM
+    # Step 13: Disable CIFS server on source SVM
     Write-Log "Disabling CIFS server on source SVM..."
     try {
         $SourceCifsServer = Get-NcCifsServer -Controller $SourceController -VserverContext $SourceSVM
@@ -278,7 +549,7 @@ try {
         throw
     }
 
-    # Step 8: Take source LIFs administratively down
+    # Step 14: Take source LIFs administratively down
     Write-Log "Taking source LIFs administratively down..."
     for ($i = 0; $i -lt $SourceLIFInfo.Count; $i++) {
         $SourceLIF = $SourceLIFInfo[$i]
@@ -300,7 +571,7 @@ try {
         }
     }
 
-    # Step 9: Update target LIF IP addresses
+    # Step 15: Update target LIF IP addresses
     Write-Log "Updating target LIF IP addresses..."
     for ($i = 0; $i -lt $SourceLIFInfo.Count; $i++) {
         $SourceLIF = $SourceLIFInfo[$i]
@@ -353,7 +624,7 @@ try {
         }
     }
 
-    # Step 10: Verify target SVM CIFS server is running
+    # Step 16: Verify target SVM CIFS server is running
     Write-Log "Verifying target SVM CIFS server status..."
     try {
         $TargetCifsServer = Get-NcCifsServer -Controller $TargetController -VserverContext $TargetSVM

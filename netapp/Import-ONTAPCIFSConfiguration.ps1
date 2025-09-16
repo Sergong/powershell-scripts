@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
-    ONTAP 9.13 CIFS SVM Configuration Import Script
+    ONTAP 9.13 CIFS Share and ACL Import Script
     
 .DESCRIPTION
-    Imports CIFS configuration exported by Export-ONTAPCIFSConfiguration.ps1
-    and applies it to a target ONTAP cluster and SVM.
+    Imports CIFS shares and ACLs exported by Export-ONTAPCIFSConfiguration.ps1
+    and applies them to a target ONTAP cluster and SVM. Works with volumes in SnapMirror relationships.
     
 .PARAMETER ImportPath
     Path to the exported configuration directory
@@ -23,9 +23,6 @@
     
 .PARAMETER SkipCifsServerCheck
     Skip CIFS server configuration check and setup
-    
-.PARAMETER BreakSnapMirrors
-    Automatically break SnapMirror relationships if found
 #>
 
 param(
@@ -45,10 +42,7 @@ param(
     [switch]$WhatIf,
     
     [Parameter(Mandatory=$false)]
-    [switch]$SkipCifsServerCheck,
-    
-    [Parameter(Mandatory=$false)]
-    [switch]$BreakSnapMirrors
+    [switch]$SkipCifsServerCheck
 )
 
 # Import NetApp PowerShell Toolkit
@@ -68,7 +62,15 @@ if (!(Test-Path -Path $ImportPath)) {
 
 # Get credentials if not provided
 if (-not $Credential) {
-    $Credential = Get-Credential -Message "Enter credentials for target cluster: $TargetCluster"
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        # PowerShell 7 compatible credential input
+        $Username = Read-Host "Enter username for cluster: $TargetCluster"
+        $SecurePassword = Read-Host "Enter password" -AsSecureString
+        $Credential = New-Object System.Management.Automation.PSCredential($Username, $SecurePassword)
+    } else {
+        # Windows PowerShell
+        $Credential = Get-Credential -Message "Enter credentials for target cluster: $TargetCluster"
+    }
 }
 
 # Initialize log file
@@ -125,66 +127,7 @@ try {
         throw "CIFS share ACLs file not found: $ACLsFile"
     }
     
-    # Load CIFS server configuration
-    $CifsServerFile = Join-Path $ImportPath "CIFS-Server.json"
-    if (Test-Path $CifsServerFile) {
-        $SourceCifsServer = Get-Content -Path $CifsServerFile | ConvertFrom-Json
-        Write-Log "[OK] Loaded source CIFS server configuration"
-    }
-
-    # Load volumes information
-    $VolumesFile = Join-Path $ImportPath "Volumes-Info.json"
-    if (Test-Path $VolumesFile) {
-        $ImportedVolumes = Get-Content -Path $VolumesFile | ConvertFrom-Json
-        Write-Log "[OK] Loaded volume information for $($ImportedVolumes.Count) volumes"
-    }
-
-    # Check for SnapMirror relationships
-    $SnapMirrorFile = Join-Path $ImportPath "SnapMirror-Relationships.json"
-    $HasSnapMirrorInfo = Test-Path $SnapMirrorFile
-    if ($HasSnapMirrorInfo) {
-        $SnapMirrorRelationships = Get-Content -Path $SnapMirrorFile | ConvertFrom-Json
-        Write-Log "[OK] Found SnapMirror relationship information for $($SnapMirrorRelationships.Count) relationships"
-        
-        if ($BreakSnapMirrors) {
-            Write-Log "Breaking SnapMirror relationships as requested..."
-            foreach ($Relationship in $SnapMirrorRelationships) {
-                $DestinationPath = $Relationship.Destination
-                Write-Log "Processing SnapMirror: $($Relationship.Source) -> $DestinationPath"
-                
-                if (!$WhatIf) {
-                    try {
-                        # Check current status
-                        $CurrentStatus = Get-NcSnapmirror -Controller $TargetController -Destination $DestinationPath
-                        if ($CurrentStatus -and $CurrentStatus.Status -ne "Broken-off") {
-                            # Quiesce first
-                            Write-Log "Quiescing SnapMirror: $DestinationPath"
-                            Invoke-NcSnapmirrorQuiesce -Controller $TargetController -Destination $DestinationPath
-                            
-                            # Wait for quiesce
-                            do {
-                                Start-Sleep -Seconds 5
-                                $Status = Get-NcSnapmirror -Controller $TargetController -Destination $DestinationPath
-                            } while ($Status.Status -eq "Quiescing")
-                            
-                            # Break
-                            Write-Log "Breaking SnapMirror: $DestinationPath"
-                            Invoke-NcSnapmirrorBreak -Controller $TargetController -Destination $DestinationPath
-                            Write-Log "[OK] Successfully broke SnapMirror: $DestinationPath"
-                        } else {
-                            Write-Log "SnapMirror already broken: $DestinationPath"
-                        }
-                    } catch {
-                        Write-Log "[NOK] Failed to break SnapMirror $DestinationPath`: $($_.Exception.Message)" "ERROR"
-                    }
-                } else {
-                    Write-Log "[WHATIF] Would break SnapMirror: $DestinationPath"
-                }
-            }
-        } else {
-            Write-Log "[NOK] SnapMirror relationships found but not breaking them (use -BreakSnapMirrors to auto-break)" "WARNING"
-        }
-    }
+    Write-Log "[OK] Minimal import - shares and ACLs only (no volume or SnapMirror dependencies)"
 
     # Check CIFS server configuration on target
     if (!$SkipCifsServerCheck) {
@@ -192,25 +135,17 @@ try {
         try {
             $TargetCifsServer = Get-NcCifsServer -Controller $TargetController -VserverContext $TargetSVM -ErrorAction SilentlyContinue
             
-            if (!$TargetCifsServer -and $SourceCifsServer) {
+            if (!$TargetCifsServer) {
                 Write-Host "`n[NOK] TARGET SVM CIFS CONFIGURATION REQUIRED [NOK]" -ForegroundColor Yellow
-                Write-Host "Source CIFS Server Details:" -ForegroundColor Cyan
-                Write-Host "  - CIFS Server Name: $($SourceCifsServer.CifsServer)" -ForegroundColor White
-                Write-Host "  - Domain: $($SourceCifsServer.Domain)" -ForegroundColor White
-                Write-Host "  - Workgroup: $($SourceCifsServer.Workgroup)" -ForegroundColor White
+                Write-Host "The target SVM must have a CIFS server configured before importing shares." -ForegroundColor Yellow
+                Write-Host "Please configure the CIFS server manually on the target SVM and re-run this script." -ForegroundColor Yellow
                 
                 if (!$WhatIf) {
-                    $ConfigureCifs = Read-Host "`nConfigure CIFS server on target SVM now? (Y/N)"
-                    if ($ConfigureCifs -eq "Y" -or $ConfigureCifs -eq "y") {
-                        # CIFS server configuration logic here
-                        Write-Log "Manual CIFS server configuration required - see source configuration above" "WARNING"
-                        Write-Host "Please configure CIFS server manually and re-run the import script." -ForegroundColor Yellow
-                        exit 1
-                    }
+                    exit 1
                 } else {
-                    Write-Log "[WHATIF] Would prompt for CIFS server configuration"
+                    Write-Log "[WHATIF] Would exit due to missing CIFS server configuration"
                 }
-            } elseif ($TargetCifsServer) {
+            } else {
                 Write-Log "[OK] Target SVM has CIFS server configured: $($TargetCifsServer.CifsServer)"
             }
         } catch {
