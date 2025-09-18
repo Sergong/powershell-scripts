@@ -127,7 +127,8 @@ try {
     $CifsShares | Select-Object ShareName, Path, Comment, 
         @{Name='ShareProperties';Expression={if($_.ShareProperties -and $_.ShareProperties.Count -gt 0) {$_.ShareProperties -join '; '} else {''}}}, 
         @{Name='SymlinkProperties';Expression={if($_.SymlinkProperties -and $_.SymlinkProperties.Count -gt 0) {$_.SymlinkProperties -join '; '} else {''}}}, 
-        @{Name='VscanProfile';Expression={if($_.VscanProfile -and $_.VscanProfile.Count -gt 0) {$_.VscanProfile -join '; '} else {''}}} | 
+        @{Name='VscanProfile';Expression={if($_.VscanProfile -and $_.VscanProfile.Count -gt 0) {$_.VscanProfile -join '; '} else {''}}}, 
+        @{Name='IsDynamic';Expression={if($_.Path -match '%[wdWD]') {'Yes'} else {'No'}}} | 
         Export-Csv -Path $SharesCSV -NoTypeInformation
     $ExportSummary.ExportedFiles += $SharesCSV
     Write-Log "[OK] CIFS shares details exported to: $SharesCSV (arrays converted to semicolon-separated values)"
@@ -162,19 +163,36 @@ try {
     Write-Log "Extracting volume names from CIFS share paths..."
     $ShareVolumes = @()
     
+    $DynamicShares = @()
+    $StaticShares = @()
+    
     foreach ($Share in $CifsShares) {
-        # Extract volume name from path (format: /volume_name/...)
-        # Note: $CifsShares already filtered out system administrative shares only
-        if ($Share.Path -and $Share.Path.StartsWith('/')) {
-            $PathParts = $Share.Path.Trim('/').Split('/')
-            if ($PathParts.Length -gt 0 -and $PathParts[0] -ne "") {
-                $VolumeName = $PathParts[0]
-                if ($ShareVolumes -notcontains $VolumeName) {
-                    $ShareVolumes += $VolumeName
-                    Write-Log "[OK] Found volume: $VolumeName (from share: $($Share.ShareName))"
+        # Check if this is a dynamic share (contains variables like %w, %d)
+        $IsDynamic = $Share.Path -match '%[wdWD]'
+        
+        if ($IsDynamic) {
+            $DynamicShares += $Share
+            Write-Log "[OK] Found dynamic share: $($Share.ShareName) with path: $($Share.Path)"
+        } else {
+            $StaticShares += $Share
+            
+            # Extract volume name from static paths only (format: /volume_name/...)
+            if ($Share.Path -and $Share.Path.StartsWith('/')) {
+                $PathParts = $Share.Path.Trim('/').Split('/')
+                if ($PathParts.Length -gt 0 -and $PathParts[0] -ne "") {
+                    $VolumeName = $PathParts[0]
+                    if ($ShareVolumes -notcontains $VolumeName) {
+                        $ShareVolumes += $VolumeName
+                        Write-Log "[OK] Found volume: $VolumeName (from share: $($Share.ShareName))"
+                    }
                 }
             }
         }
+    }
+    
+    if ($DynamicShares.Count -gt 0) {
+        Write-Log "[OK] Found $($DynamicShares.Count) dynamic shares with variable substitution"
+        Write-Log "  Dynamic shares: $($DynamicShares.ShareName -join ', ')"
     }
     
     # Export volume list
@@ -213,6 +231,8 @@ Export Information:
 - Source SVM: $SourceSVM  
 - Export Date: $ExportTimestamp
 - Total Shares: $($CifsShares.Count)
+- Dynamic Shares: $($DynamicShares.Count)
+- Static Shares: $($StaticShares.Count)
 - Total ACL Entries: $($ShareACLs.Count)
 - Volumes from Shares: $($ShareVolumes.Count)
 
@@ -230,6 +250,14 @@ IMPORTANT NOTES:
 - Domain/workgroup configuration must be set up manually on target SVM
 - This export contains only shares and ACLs, not volume or SVM configuration
 - Target volumes must already exist and be accessible via the same paths
+- Dynamic shares (with %w, %d variables) are fully supported and will be migrated
+- Dynamic share variables are resolved by ONTAP at runtime based on user context
+
+DYNAMIC SHARE REQUIREMENTS:
+- For dynamic shares to function, target volumes must contain the expected directory structure
+- SnapMirror should replicate all user directories (e.g., /vol_home/user1, /vol_home/user2)
+- If user directories don't exist, users will get 'path not found' errors
+- Consider running a final SnapMirror update before cutover to ensure latest directories
 
 Generated on: $(Get-Date)
 "@

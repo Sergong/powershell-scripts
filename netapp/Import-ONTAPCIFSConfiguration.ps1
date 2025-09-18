@@ -156,6 +156,9 @@ try {
     # Import CIFS shares
     Write-Log "Importing CIFS shares to target SVM..."
     $SharesCreated = 0
+    $DynamicSharesImported = 0
+    $StaticSharesImported = 0
+    
     foreach ($Share in $ImportedShares) {
         $ShareName = $Share.ShareName
         
@@ -164,8 +167,12 @@ try {
             Write-Log "Skipping system share: $ShareName"
             continue
         }
-
-        Write-Log "Creating CIFS share: $ShareName at path: $($Share.Path)"
+        
+        # Check if this is a dynamic share
+        $IsDynamic = $Share.Path -match '%[wdWD]'
+        $ShareType = if ($IsDynamic) { "dynamic" } else { "static" }
+        
+        Write-Log "Creating CIFS $ShareType share: $ShareName at path: $($Share.Path)"
         
         if (!$WhatIf) {
             try {
@@ -194,8 +201,18 @@ try {
                 if ($Share.VscanProfile) { $ShareParams.VscanProfile = $Share.VscanProfile }
 
                 Add-NcCifsShare @ShareParams
-                Write-Log "[OK] Successfully created CIFS share: $ShareName"
+                Write-Log "[OK] Successfully created CIFS $ShareType share: $ShareName"
                 $SharesCreated++
+                
+                # Additional validation for dynamic shares
+                if ($IsDynamic) {
+                    $DynamicSharesImported++
+                    Write-Log "[INFO] Dynamic share '$ShareName' created - verify target volume contains user directories"
+                    Write-Log "  Path template: $($Share.Path)"
+                    Write-Log "  Note: User directories must exist in target volume for dynamic share to function"
+                } else {
+                    $StaticSharesImported++
+                }
                 
                 # Remove default Everyone permission
                 try {
@@ -209,7 +226,7 @@ try {
                 Write-Log "[NOK] Failed to create CIFS share $ShareName`: $($_.Exception.Message)" "ERROR"
             }
         } else {
-            Write-Log "[WHATIF] Would create CIFS share: $ShareName at path: $($Share.Path)"
+            Write-Log "[WHATIF] Would create CIFS $ShareType share: $ShareName at path: $($Share.Path)"
         }
     }
 
@@ -240,7 +257,9 @@ try {
     }
 
     Write-Log "=== CIFS Configuration Import Completed ===" "SUCCESS"
-    Write-Log "Shares Created: $SharesCreated"
+    Write-Log "Total Shares Created: $SharesCreated"
+    Write-Log "  - Dynamic Shares: $DynamicSharesImported"
+    Write-Log "  - Static Shares: $StaticSharesImported"
     Write-Log "ACLs Created: $ACLsCreated"
     
 } catch {
@@ -266,6 +285,8 @@ try {
 # Display summary
 Write-Host "`n=== Import Summary ===" -ForegroundColor Cyan
 Write-Host "Target: $TargetCluster -> $TargetSVM" -ForegroundColor White
-Write-Host "Shares Imported: $SharesCreated" -ForegroundColor Green
+Write-Host "Total Shares Imported: $SharesCreated" -ForegroundColor Green
+Write-Host "  Dynamic Shares: $DynamicSharesImported" -ForegroundColor Cyan
+Write-Host "  Static Shares: $StaticSharesImported" -ForegroundColor Cyan
 Write-Host "ACLs Imported: $ACLsCreated" -ForegroundColor Green
 Write-Host "Import Log: $LogFile" -ForegroundColor Yellow

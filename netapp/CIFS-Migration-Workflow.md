@@ -69,15 +69,16 @@ This document describes the revised workflow for migrating CIFS shares and servi
    - Validate discovered volumes against exported share data (if export path provided)
    - Display comprehensive volume analysis
 
-3. **SnapMirror Operations**:
-   - Quiesce SnapMirror relationships
-   - Break SnapMirror relationships
-   - Verify volumes are read-write on target
-
-4. **CIFS Service Migration**:
+3. **CIFS Service Shutdown**:
    - Check for active CIFS sessions on source
    - Stop CIFS server on source SVM
    - Take source LIFs administratively down
+
+4. **Final SnapMirror Operations**:
+   - Perform final SnapMirror update (captures any last changes)
+   - Quiesce SnapMirror relationships
+   - Break SnapMirror relationships
+   - Verify volumes are read-write on target
 
 5. **IP Address Migration**:
    - Migrate IP addresses from source LIFs to target LIFs (1:1 mapping)
@@ -130,8 +131,9 @@ This document describes the revised workflow for migrating CIFS shares and servi
 4. **Cleaner Separation**: Each script has a focused responsibility
 5. **Auto-Discovery**: Automatically discovers SnapMirror volumes and CIFS LIFs, no manual lists required
 6. **Flexible LIF Support**: Works with single or multiple CIFS LIFs (1:1 mapping)
-7. **Volume Validation**: Cross-validates SnapMirror volumes against exported share data
-8. **PowerShell 7 Compatible**: Added credential handling for both Windows PowerShell and PowerShell 7
+7. **Dynamic Share Support**: Full support for ONTAP dynamic shares with variable substitution
+8. **Volume Validation**: Cross-validates SnapMirror volumes against exported share data
+9. **PowerShell 7 Compatible**: Added credential handling for both Windows PowerShell and PowerShell 7
 
 ## Troubleshooting
 
@@ -151,8 +153,36 @@ If cutover fails:
 3. Restore source LIF IP addresses
 4. Remove CIFS shares from target SVM (if desired)
 
+## Dynamic Share Support
+
+### **What are Dynamic Shares?**
+Dynamic shares use ONTAP variable substitution to create user-specific paths:
+- **`%w`** - Username (e.g., `jdoe`)
+- **`%d`** - Domain (e.g., `CORP`)
+- **`%W`** - Username in uppercase
+- **`%D`** - Domain in uppercase
+
+### **Example Dynamic Shares:**
+```
+Share Name: HomeDirectories
+Path: /vol_home/%w
+Result: User 'jdoe' sees /vol_home/jdoe
+
+Share Name: UserProfiles  
+Path: /vol_profiles/%d/%w
+Result: User 'jdoe' in 'CORP' domain sees /vol_profiles/CORP/jdoe
+```
+
+### **Migration Handling:**
+✅ **Export**: Identifies and properly exports dynamic shares with variables intact  
+✅ **Validation**: New script to verify supporting directory structures exist on target  
+✅ **Import**: Creates dynamic shares on target with exact variable substitution  
+✅ **Takeover**: Dynamic shares continue working after IP migration  
+✅ **Logging**: Clear identification of dynamic vs static shares in all operations
+
 ## Notes
 - All scripts now include PowerShell 7 compatibility for credential input
+- Dynamic shares are fully supported and migrated with variable substitution intact
 - Each script generates detailed logs for troubleshooting
 - Use `-WhatIf` parameter for safe testing of operations
 - Scripts follow PowerShell best practices from the WARP.md rules

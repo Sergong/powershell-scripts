@@ -420,13 +420,64 @@ try {
         Write-Log "  Target: $($TargetLIF.Name) ($($TargetLIF.IPAddress)/$($TargetLIF.NetmaskLength)) -> ($($SourceLIF.IPAddress)/$($SourceLIF.NetmaskLength))"
     }
 
-    # Step 11: Break SnapMirror relationships (if specified)
+    # Step 11: Final SnapMirror update (after CIFS is offline)
     if ($SnapMirrorVolumes -and $SnapMirrorVolumes.Count -gt 0 -and !$SkipSnapMirrorBreak) {
-        Write-Log "Breaking SnapMirror relationships before cutover..."
+        Write-Log "Performing final SnapMirror updates (source CIFS is now offline)..."
         
         foreach ($VolumeName in $SnapMirrorVolumes) {
             $DestinationPath = "${TargetSVM}:$VolumeName"
-            Write-Log "Processing SnapMirror for volume: $VolumeName"
+            Write-Log "Updating SnapMirror for volume: $VolumeName"
+            
+            if (!$WhatIf) {
+                try {
+                    # Check current SnapMirror status
+                    $SMRelation = Get-NcSnapmirror -Controller $TargetController -Destination $DestinationPath -ErrorAction SilentlyContinue
+                    
+                    if ($SMRelation) {
+                        if ($SMRelation.Status -notin @("Broken-off", "Quiesced")) {
+                            Write-Log "Running final SnapMirror update: $DestinationPath"
+                            Write-Log "  Current lag time: $($SMRelation.LagTime)"
+                            
+                            # Perform final update
+                            Invoke-NcSnapmirrorUpdate -Controller $TargetController -Destination $DestinationPath
+                            
+                            # Wait for update to complete
+                            Write-Log "Waiting for final SnapMirror update to complete..."
+                            do {
+                                Start-Sleep -Seconds 15
+                                $SMStatus = Get-NcSnapmirror -Controller $TargetController -Destination $DestinationPath
+                                Write-Log "  Status: $($SMStatus.Status), Lag: $($SMStatus.LagTime)"
+                            } while ($SMStatus.Status -eq "Transferring")
+                            
+                            Write-Log "[OK] Final SnapMirror update completed for: $DestinationPath"
+                            Write-Log "  Final lag time: $($SMStatus.LagTime)"
+                            
+                        } else {
+                            Write-Log "[OK] SnapMirror already quiesced or broken: $DestinationPath (Status: $($SMRelation.Status))"
+                        }
+                    } else {
+                        Write-Log "[NOK] No SnapMirror relationship found for: $DestinationPath" "WARNING"
+                    }
+                    
+                } catch {
+                    Write-Log "[NOK] Failed to update SnapMirror for $DestinationPath`: $($_.Exception.Message)" "WARNING"
+                    Write-Log "  Continuing with quiesce and break operations..."
+                }
+            } else {
+                Write-Log "[WHATIF] Would perform final SnapMirror update: $DestinationPath"
+            }
+        }
+        
+        Write-Log "[OK] Final SnapMirror update operations completed"
+    }
+    
+    # Step 12: Break SnapMirror relationships (if specified)
+    if ($SnapMirrorVolumes -and $SnapMirrorVolumes.Count -gt 0 -and !$SkipSnapMirrorBreak) {
+        Write-Log "Breaking SnapMirror relationships after final update..."
+        
+        foreach ($VolumeName in $SnapMirrorVolumes) {
+            $DestinationPath = "${TargetSVM}:$VolumeName"
+            Write-Log "Processing SnapMirror break for volume: $VolumeName"
             
             if (!$WhatIf) {
                 try {
@@ -438,17 +489,21 @@ try {
                         Write-Log "Current Status: $($SMRelation.Status)"
                         
                         if ($SMRelation.Status -ne "Broken-off") {
-                            # Quiesce the relationship first
-                            Write-Log "Quiescing SnapMirror: $DestinationPath"
-                            Invoke-NcSnapmirrorQuiesce -Controller $TargetController -Destination $DestinationPath
-                            
-                            # Wait for quiesce to complete
-                            Write-Log "Waiting for quiesce to complete..."
-                            do {
-                                Start-Sleep -Seconds 10
-                                $SMStatus = Get-NcSnapmirror -Controller $TargetController -Destination $DestinationPath
-                                Write-Log "  Status: $($SMStatus.Status)"
-                            } while ($SMStatus.Status -eq "Quiescing")
+                            # Quiesce the relationship first (if not already done)
+                            if ($SMRelation.Status -ne "Quiesced") {
+                                Write-Log "Quiescing SnapMirror: $DestinationPath"
+                                Invoke-NcSnapmirrorQuiesce -Controller $TargetController -Destination $DestinationPath
+                                
+                                # Wait for quiesce to complete
+                                Write-Log "Waiting for quiesce to complete..."
+                                do {
+                                    Start-Sleep -Seconds 10
+                                    $SMStatus = Get-NcSnapmirror -Controller $TargetController -Destination $DestinationPath
+                                    Write-Log "  Status: $($SMStatus.Status)"
+                                } while ($SMStatus.Status -eq "Quiescing")
+                            } else {
+                                Write-Log "SnapMirror already quiesced: $DestinationPath"
+                            }
                             
                             # Break the relationship
                             Write-Log "Breaking SnapMirror: $DestinationPath"
@@ -484,7 +539,7 @@ try {
         Write-Log "No SnapMirror volumes specified - continuing without SnapMirror operations"
     }
 
-    # Step 12: Check for active CIFS sessions on source SVM
+    # Step 13: Check for active CIFS sessions on source SVM
     Write-Log "Checking for active CIFS sessions on source SVM..."
     try {
         $ActiveSessions = Get-NcCifsSession -Controller $SourceController -VserverContext $SourceSVM
@@ -516,7 +571,7 @@ try {
         Write-Log "[NOK] Could not check CIFS sessions: $($_.Exception.Message)" "WARNING"
     }
 
-    # Step 13: Disable CIFS server on source SVM
+    # Step 14: Disable CIFS server on source SVM
     Write-Log "Disabling CIFS server on source SVM..."
     try {
         $SourceCifsServer = Get-NcCifsServer -Controller $SourceController -VserverContext $SourceSVM
@@ -549,7 +604,7 @@ try {
         throw
     }
 
-    # Step 14: Take source LIFs administratively down
+    # Step 15: Take source LIFs administratively down
     Write-Log "Taking source LIFs administratively down..."
     for ($i = 0; $i -lt $SourceLIFInfo.Count; $i++) {
         $SourceLIF = $SourceLIFInfo[$i]
@@ -571,7 +626,7 @@ try {
         }
     }
 
-    # Step 15: Update target LIF IP addresses
+    # Step 16: Update target LIF IP addresses
     Write-Log "Updating target LIF IP addresses..."
     for ($i = 0; $i -lt $SourceLIFInfo.Count; $i++) {
         $SourceLIF = $SourceLIFInfo[$i]
@@ -624,7 +679,7 @@ try {
         }
     }
 
-    # Step 16: Verify target SVM CIFS server is running
+    # Step 17: Verify target SVM CIFS server is running
     Write-Log "Verifying target SVM CIFS server status..."
     try {
         $TargetCifsServer = Get-NcCifsServer -Controller $TargetController -VserverContext $TargetSVM
