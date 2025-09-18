@@ -162,27 +162,23 @@ try {
             Write-Log "  Junction Path: $($Volume.VolumeIdAttributes.JunctionPath)"
             Write-Log "  Size: $([math]::Round($Volume.VolumeSpaceAttributes.Size/1GB,2)) GB"
             
-            # For each sample user, check if path would resolve
-            $MissingPaths = @()
-            $ExistingPaths = @()
+            # For each sample user, simulate expected path resolution
+            $ExpectedPaths = @()
             
             foreach ($TestUser in $SampleUsers) {
                 foreach ($Share in $VolumesToCheck[$VolumeName]) {
-                    # Simulate path resolution
+                    # Simulate path resolution for different variables
                     $TestPath = $Share.Path -replace '%w', $TestUser.ToLower()
                     $TestPath = $TestPath -replace '%W', $TestUser.ToUpper()
                     $TestPath = $TestPath -replace '%d', 'testdomain'
                     $TestPath = $TestPath -replace '%D', 'TESTDOMAIN'
                     
-                    # Convert ONTAP path to actual file system path
-                    $FileSystemPath = $TestPath.Replace('/', '\')
-                    
-                    Write-Log "  Testing path for user '$TestUser': $TestPath"
+                    Write-Log "  Expected path for user '$TestUser': $TestPath"
                     
                     # Note: We cannot directly test file system paths via PowerShell toolkit
                     # This would require additional file system access or ONTAP CLI commands
                     # For now, we'll log the expected paths that should exist
-                    $ExistingPaths += @{
+                    $ExpectedPaths += @{
                         User = $TestUser
                         Share = $Share.ShareName
                         ExpectedPath = $TestPath
@@ -195,7 +191,7 @@ try {
                 Status = "Volume Found"
                 Details = "Volume exists - manual verification of user directories recommended"
                 Shares = $VolumesToCheck[$VolumeName]
-                ExpectedPaths = $ExistingPaths
+                ExpectedPaths = $ExpectedPaths
             }
             
         } catch {
