@@ -96,7 +96,18 @@ try {
 
     # Step 1: Export CIFS Shares
     Write-Log "Collecting CIFS shares..."
-    $CifsShares = Get-NcCifsShare -Controller $SourceController -VserverContext $SourceSVM
+    $AllCifsShares = Get-NcCifsShare -Controller $SourceController -VserverContext $SourceSVM
+    
+    # Filter out hidden/administrative shares (ending with $)
+    $CifsShares = $AllCifsShares | Where-Object {
+        $_.ShareName -notmatch '\$$' -or $_.ShareName -in @("admin$", "c$", "ipc$")
+    } | Where-Object {
+        $_.ShareName -notin @("admin$", "c$", "ipc$")
+    }
+    
+    $HiddenSharesCount = $AllCifsShares.Count - $CifsShares.Count
+    Write-Log "[OK] Found $($AllCifsShares.Count) total CIFS shares, filtered out $HiddenSharesCount hidden/administrative shares"
+    
     $SharesFile = Join-Path $ExportDirectory "CIFS-Shares.json"
     $SharesFileXML = Join-Path $ExportDirectory "CIFS-Shares.xml"
     
@@ -106,8 +117,7 @@ try {
     
     $ExportSummary.Shares = $CifsShares
     $ExportSummary.ExportedFiles += @($SharesFile, $SharesFileXML)
-    Write-Log "[OK] Found $($CifsShares.Count) CIFS shares"
-    Write-Log "[OK] CIFS shares exported to: $SharesFile"
+    Write-Log "[OK] Exported $($CifsShares.Count) user shares to: $SharesFile"
 
     # Export detailed share information to CSV for review (with proper array handling)
     $SharesCSV = Join-Path $ExportDirectory "CIFS-Shares-Details.csv"
@@ -121,7 +131,15 @@ try {
 
     # Step 2: Export CIFS Share ACLs
     Write-Log "Collecting CIFS share ACLs..."
-    $ShareACLs = Get-NcCifsShareAcl -Controller $SourceController -VserverContext $SourceSVM
+    $AllShareACLs = Get-NcCifsShareAcl -Controller $SourceController -VserverContext $SourceSVM
+    
+    # Filter ACLs to only include those for user shares (not hidden/administrative shares)
+    $UserShareNames = $CifsShares | ForEach-Object { $_.ShareName }
+    $ShareACLs = $AllShareACLs | Where-Object { $_.Share -in $UserShareNames }
+    
+    $FilteredACLsCount = $AllShareACLs.Count - $ShareACLs.Count
+    Write-Log "[OK] Found $($AllShareACLs.Count) total share ACL entries, filtered out $FilteredACLsCount ACLs for hidden/administrative shares"
+    
     $ACLsFile = Join-Path $ExportDirectory "CIFS-ShareACLs.json"
     $ACLsFileXML = Join-Path $ExportDirectory "CIFS-ShareACLs.xml"
     
@@ -130,8 +148,7 @@ try {
     
     $ExportSummary.ShareACLs = $ShareACLs
     $ExportSummary.ExportedFiles += @($ACLsFile, $ACLsFileXML)
-    Write-Log "[OK] Found $($ShareACLs.Count) share ACL entries"
-    Write-Log "[OK] Share ACLs exported to: $ACLsFile"
+    Write-Log "[OK] Exported $($ShareACLs.Count) share ACL entries for user shares to: $ACLsFile"
 
     # Export ACLs to CSV for review
     $ACLsCSV = Join-Path $ExportDirectory "CIFS-ShareACLs-Details.csv"
@@ -143,12 +160,8 @@ try {
     $ShareVolumes = @()
     
     foreach ($Share in $CifsShares) {
-        # Skip system shares
-        if ($Share.ShareName -in @("admin$", "c$", "ipc$")) {
-            continue
-        }
-        
         # Extract volume name from path (format: /volume_name/...)
+        # Note: $CifsShares already filtered out hidden/administrative shares
         if ($Share.Path -and $Share.Path.StartsWith('/')) {
             $PathParts = $Share.Path.Trim('/').Split('/')
             if ($PathParts.Length -gt 0 -and $PathParts[0] -ne "") {
