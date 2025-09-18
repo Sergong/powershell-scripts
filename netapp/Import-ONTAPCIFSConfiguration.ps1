@@ -249,9 +249,14 @@ try {
 } finally {
     if ($TargetController) {
         try {
-            # Disconnect from the specific controller
-            Disconnect-NcController $TargetController
-            Write-Log "[OK] Disconnected from target cluster"
+            # Check if disconnect cmdlet is available
+            if (Get-Command "Disconnect-NcController" -ErrorAction SilentlyContinue) {
+                Disconnect-NcController $TargetController
+                Write-Log "[OK] Disconnected from target cluster"
+            } else {
+                # No explicit disconnect cmdlet available - connection will close when session ends
+                Write-Log "[OK] Target cluster connection will close automatically when session ends"
+            }
         } catch {
             Write-Log "[NOK] Warning: Could not properly disconnect from target cluster: $($_.Exception.Message)" "WARNING"
         }

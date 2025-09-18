@@ -234,9 +234,14 @@ Generated on: $(Get-Date)
 } finally {
     if ($SourceController) {
         try {
-            # Disconnect from the specific controller
-            Disconnect-NcController $SourceController
-            Write-Log "[OK] Disconnected from source cluster"
+            # Check if disconnect cmdlet is available
+            if (Get-Command "Disconnect-NcController" -ErrorAction SilentlyContinue) {
+                Disconnect-NcController $SourceController
+                Write-Log "[OK] Disconnected from source cluster"
+            } else {
+                # No explicit disconnect cmdlet available - connection will close when session ends
+                Write-Log "[OK] Source cluster connection will close automatically when session ends"
+            }
         } catch {
             Write-Log "[NOK] Warning: Could not properly disconnect from source cluster: $($_.Exception.Message)" "WARNING"
         }
