@@ -249,10 +249,11 @@ try {
 } finally {
     if ($TargetController) {
         try {
-            Disconnect-NcController -Controller $TargetController
+            # Disconnect from the specific controller
+            Disconnect-NcController $TargetController
             Write-Log "[OK] Disconnected from target cluster"
         } catch {
-            Write-Log "[NOK] Warning: Could not properly disconnect from target cluster" "WARNING"
+            Write-Log "[NOK] Warning: Could not properly disconnect from target cluster: $($_.Exception.Message)" "WARNING"
         }
     }
 }

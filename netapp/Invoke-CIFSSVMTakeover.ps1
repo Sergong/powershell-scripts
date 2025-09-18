@@ -654,7 +654,8 @@ try {
     if ($SourceController) {
         try {
             Write-Log "Disconnecting from source cluster"
-            Disconnect-NcController -Controller $SourceController
+            # Disconnect from the specific controller
+            Disconnect-NcController $SourceController
             Write-Log "[OK] Disconnected from source cluster successfully"
         } catch {
             Write-Log "[NOK] Warning: Could not properly disconnect from source cluster: $($_.Exception.Message)" "WARNING"
@@ -664,7 +665,8 @@ try {
     if ($TargetController) {
         try {
             Write-Log "Disconnecting from target cluster"
-            Disconnect-NcController -Controller $TargetController
+            # Disconnect from the specific controller
+            Disconnect-NcController $TargetController
             Write-Log "[OK] Disconnected from target cluster successfully"
         } catch {
             Write-Log "[NOK] Warning: Could not properly disconnect from target cluster: $($_.Exception.Message)" "WARNING"

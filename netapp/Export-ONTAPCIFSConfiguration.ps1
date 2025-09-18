@@ -109,11 +109,15 @@ try {
     Write-Log "[OK] Found $($CifsShares.Count) CIFS shares"
     Write-Log "[OK] CIFS shares exported to: $SharesFile"
 
-    # Export detailed share information to CSV for review
+    # Export detailed share information to CSV for review (with proper array handling)
     $SharesCSV = Join-Path $ExportDirectory "CIFS-Shares-Details.csv"
-    $CifsShares | Select-Object ShareName, Path, Comment, ShareProperties, SymlinkProperties, VscanProfile | Export-Csv -Path $SharesCSV -NoTypeInformation
+    $CifsShares | Select-Object ShareName, Path, Comment, 
+        @{Name='ShareProperties';Expression={if($_.ShareProperties -and $_.ShareProperties.Count -gt 0) {$_.ShareProperties -join '; '} else {''}}}, 
+        @{Name='SymlinkProperties';Expression={if($_.SymlinkProperties -and $_.SymlinkProperties.Count -gt 0) {$_.SymlinkProperties -join '; '} else {''}}}, 
+        @{Name='VscanProfile';Expression={if($_.VscanProfile -and $_.VscanProfile.Count -gt 0) {$_.VscanProfile -join '; '} else {''}}} | 
+        Export-Csv -Path $SharesCSV -NoTypeInformation
     $ExportSummary.ExportedFiles += $SharesCSV
-    Write-Log "[OK] CIFS shares details exported to: $SharesCSV"
+    Write-Log "[OK] CIFS shares details exported to: $SharesCSV (arrays converted to semicolon-separated values)"
 
     # Step 2: Export CIFS Share ACLs
     Write-Log "Collecting CIFS share ACLs..."
@@ -230,10 +234,11 @@ Generated on: $(Get-Date)
 } finally {
     if ($SourceController) {
         try {
-            Disconnect-NcController -Controller $SourceController
+            # Disconnect from the specific controller
+            Disconnect-NcController $SourceController
             Write-Log "[OK] Disconnected from source cluster"
         } catch {
-            Write-Log "[NOK] Warning: Could not properly disconnect from source cluster" "WARNING"
+            Write-Log "[NOK] Warning: Could not properly disconnect from source cluster: $($_.Exception.Message)" "WARNING"
         }
     }
 }
