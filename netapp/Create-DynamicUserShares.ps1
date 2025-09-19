@@ -118,7 +118,8 @@ function Write-Log {
 
 $JunctionPath = "/$VolumeName"
 $SearchPath = "/$VolumeName/$AllUsersPath"
-$SharePath = "$AllUsersPath/%w"
+# For ONTAP dynamic home directory shares, use %w and set homedirectory at creation time
+$SharePath = "%w"
 
 try {
     # Connect to ONTAP Cluster
@@ -205,24 +206,18 @@ try {
     Write-Log "Creating dynamic home directory share: $DynamicShareName"
     $ExistingDynamicShare = Get-NcCifsShare -Name $DynamicShareName -Vserver $SVMName -ErrorAction SilentlyContinue
     if (-not $ExistingDynamicShare) {
+        # Ensure 'homedirectory' property is set at creation time so ONTAP accepts non-absolute %w path
+        $ShareProperties = @("homedirectory", "oplocks", "browsable", "changenotify")
         $DynamicShareParams = @{
             Name = $DynamicShareName  # %w
-            Path = $SharePath         # %w  
-            Vserver = $SVMName
-        }
-        Add-NcCifsShare @DynamicShareParams -ErrorAction Stop
-        
-        # Set home directory properties
-        $ShareProperties = @("homedirectory", "oplocks", "browsable", "changenotify")
-        $SharePropertiesParams = @{
-            Name = $DynamicShareName
+            Path = $SharePath         # %w
             ShareProperties = $ShareProperties
             Vserver = $SVMName
             ErrorAction = 'Stop'
         }
-        Set-NcCifsShare @SharePropertiesParams
+        Add-NcCifsShare @DynamicShareParams
         
-        Write-Log "Dynamic home directory share '$DynamicShareName' created with path '$SharePath'" -Level "SUCCESS"
+        Write-Log "Dynamic home directory share '$DynamicShareName' created with path '$SharePath' and homedirectory property" -Level "SUCCESS"
     } else {
         Write-Log "Dynamic home directory share $DynamicShareName already exists" -Level "WARNING"
     }
