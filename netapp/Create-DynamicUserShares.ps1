@@ -1,0 +1,403 @@
+<#
+.SYNOPSIS
+    Creates dynamic home directories in ONTAP using %w for both share name and path
+.DESCRIPTION
+    Automates creation of dynamic home directories where users access \\server\username
+    The %w variable automatically resolves to the user's Windows username for both share name and path
+.PARAMETER ClusterName
+    ONTAP cluster management LIF or name
+.PARAMETER SVMName
+    Storage Virtual Machine name
+.PARAMETER VolumeName
+    Volume name for home directories
+.PARAMETER AggregateName
+    Aggregate to create volume on
+.PARAMETER VolumeSize
+    Size of the home directory volume
+.PARAMETER Domain
+    Active Directory domain name
+.PARAMETER UserList
+    Array of usernames to create home directories for
+.PARAMETER UserQuota
+    Individual user quota limit
+.PARAMETER UserSoftQuota
+    Individual user soft quota limit
+.EXAMPLE
+    .\Create-DynamicHomeDirectories.ps1 -ClusterName "cluster1.company.com" -SVMName "svm_cifs" -VolumeName "user_homes" -AggregateName "aggr1" -VolumeSize "10GB" -Domain "COMPANY" -UserList @("jsmith","bmiller","sthomas") -UserQuota "2GB" -UserSoftQuota "2GB"
+#>
+
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$ClusterName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$SVMName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$VolumeName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$AggregateName,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$VolumeSize,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$Domain,
+    
+    [Parameter(Mandatory=$true)]
+    [string[]]$UserList,
+    
+    [Parameter(Mandatory=$false)]
+    [string]$UserQuota = "",
+    
+    [Parameter(Mandatory=$false)]
+    [string]$UserSoftQuota = "",
+    
+    [Parameter(Mandatory=$false)]
+    [string]$JunctionPath = "/home",
+    
+    [Parameter(Mandatory=$false)]
+    [string]$DynamicShareName = "%w",
+    
+    [Parameter(Mandatory=$false)]
+    [string]$SharePath = "%w",
+    
+    [Parameter(Mandatory=$false)]
+    [string]$SearchPath = "/home"
+)
+
+#Requires -Modules DataONTAP
+
+# Import NetApp ONTAP PowerShell Toolkit
+Import-Module DataONTAP -ErrorAction Stop
+
+# Function to log output with timestamp
+function Write-Log {
+    param([string]$Message, [string]$Level = "INFO")
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Write-Host "[$timestamp] [$Level] $Message" -ForegroundColor $(
+        switch($Level) {
+            "ERROR" { "Red" }
+            "WARNING" { "Yellow" }
+            "SUCCESS" { "Green" }
+            default { "White" }
+        }
+    )
+}
+
+try {
+    # Connect to ONTAP Cluster
+    Write-Log "Connecting to ONTAP cluster: $ClusterName"
+    $Credential = Get-Credential -Message "Enter ONTAP cluster credentials"
+    $Controller = Connect-NcController -Name $ClusterName -Credential $Credential -ErrorAction Stop
+    Write-Log "Successfully connected to cluster: $ClusterName" -Level "SUCCESS"
+
+    # Verify SVM exists and CIFS is configured
+    Write-Log "Verifying SVM: $SVMName"
+    $SVM = Get-NcVserver -Name $SVMName -ErrorAction SilentlyContinue
+    if (-not $SVM) {
+        Write-Log "SVM $SVMName not found!" -Level "ERROR"
+        exit 1
+    }
+    
+    # Check CIFS server status
+    $CIFSServer = Get-NcCifsServer -VserverContext $SVMName -ErrorAction SilentlyContinue
+    if (-not $CIFSServer) {
+        Write-Log "CIFS server not configured on SVM $SVMName!" -Level "ERROR"
+        exit 1
+    }
+    Write-Log "SVM $SVMName and CIFS server verified" -Level "SUCCESS"
+
+    # Create Home Directory Volume
+    Write-Log "Creating volume: $VolumeName"
+    $ExistingVolume = Get-NcVol -Name $VolumeName -Vserver $SVMName -ErrorAction SilentlyContinue
+    if (-not $ExistingVolume) {
+        $VolumeParams = @{
+            Name = $VolumeName
+            Aggregate = $AggregateName
+            Size = $VolumeSize
+            JunctionPath = $JunctionPath
+            SecurityStyle = "ntfs"
+            Vserver = $SVMName
+        }
+        New-NcVol @VolumeParams -ErrorAction Stop
+        Write-Log "Volume $VolumeName created successfully" -Level "SUCCESS"
+    } else {
+        Write-Log "Volume $VolumeName already exists" -Level "WARNING"
+    }
+
+    # Create administrative share for directory creation
+    Write-Log "Creating administrative share for setup"
+    $AdminShareName = "$VolumeName$"
+    $ExistingAdminShare = Get-NcCifsShare -Name $AdminShareName -Vserver $SVMName -ErrorAction SilentlyContinue
+    if (-not $ExistingAdminShare) {
+        $AdminShareParams = @{
+            Name = $AdminShareName
+            Path = $JunctionPath
+            Vserver = $SVMName
+        }
+        Add-NcCifsShare @AdminShareParams -ErrorAction Stop
+        Write-Log "Administrative share $AdminShareName created" -Level "SUCCESS"
+    } else {
+        Write-Log "Administrative share $AdminShareName already exists" -Level "WARNING"
+    }
+
+    # Create user directories directly under the volume root
+    Write-Log "Creating user directories under volume root"
+    $ShareUNC = "\\$($CIFSServer.CifsServer)\$AdminShareName"
+    $TempDrive = "Z:"
+    
+    try {
+        net use $TempDrive $ShareUNC /persistent:no | Out-Null
+        Write-Log "Mapped administrative share to $TempDrive" -Level "SUCCESS"
+        
+        # Create individual user directories directly under volume root
+        foreach ($username in $UserList) {
+            $userPath = "$TempDrive\$username"
+            if (-not (Test-Path $userPath)) {
+                New-Item -Path $userPath -ItemType Directory -Force | Out-Null
+                Write-Log "Created user directory: $username" -Level "SUCCESS"
+            } else {
+                Write-Log "User directory already exists: $username" -Level "WARNING"
+            }
+        }
+    } finally {
+        # Disconnect mapped drive
+        net use $TempDrive /delete /y 2>$null | Out-Null
+    }
+
+    # Create Dynamic Home Directory Share with %w as share name
+    Write-Log "Creating dynamic home directory share: $DynamicShareName"
+    $ExistingDynamicShare = Get-NcCifsShare -Name $DynamicShareName -Vserver $SVMName -ErrorAction SilentlyContinue
+    if (-not $ExistingDynamicShare) {
+        $DynamicShareParams = @{
+            Name = $DynamicShareName  # %w
+            Path = $SharePath         # %w  
+            Vserver = $SVMName
+        }
+        Add-NcCifsShare @DynamicShareParams -ErrorAction Stop
+        
+        # Set home directory properties
+        $ShareProperties = @("homedirectory", "oplocks", "browsable", "changenotify")
+        Set-NcCifsShare -Name $DynamicShareName -ShareProperties $ShareProperties -Vserver $SVMName -ErrorAction Stop
+        
+        Write-Log "Dynamic home directory share '$DynamicShareName' created with path '$SharePath'" -Level "SUCCESS"
+    } else {
+        Write-Log "Dynamic home directory share $DynamicShareName already exists" -Level "WARNING"
+    }
+
+    # Configure Home Directory Search Path
+    Write-Log "Configuring home directory search path: $SearchPath"
+    try {
+        Add-NcCifsHomeDirSearchPath -Path $SearchPath -Vserver $SVMName -ErrorAction Stop
+        Write-Log "Home directory search path configured: $SearchPath" -Level "SUCCESS"
+    } catch {
+        Write-Log "Home directory search path may already exist: $($_.Exception.Message)" -Level "WARNING"
+    }
+
+    # Configure User Quotas (only if quotas are specified)
+    if ($UserQuota -and $UserQuota -ne "" -and $UserQuota -ne "0" -and $UserQuota -ne "0GB") {
+        Write-Log "Configuring user quotas"
+        foreach ($username in $UserList) {
+            $domainUser = "$Domain\$username"
+            Write-Log "Setting quota for user: $domainUser"
+            
+            $UserQuotaParams = @{
+                Volume = $VolumeName
+                Target = $domainUser
+                DiskLimit = $UserQuota
+                SoftDiskLimit = $UserSoftQuota
+                Type = "user"
+                Vserver = $SVMName
+            }
+            
+            try {
+                Add-NcQuota @UserQuotaParams -ErrorAction Stop
+                Write-Log "Quota set for $domainUser" -Level "SUCCESS"
+            } catch {
+                Write-Log "Failed to set quota for $domainUser`: $($_.Exception.Message)" -Level "WARNING"
+            }
+        }
+
+        # Enable Quotas on Volume (only if quotas were configured)
+        Write-Log "Enabling quotas on volume $VolumeName"
+        try {
+            Enable-NcQuota -Volume $VolumeName -Vserver $SVMName -ErrorAction Stop
+            Write-Log "Quotas enabled on volume $VolumeName" -Level "SUCCESS"
+        } catch {
+            Write-Log "Failed to enable quotas: $($_.Exception.Message)" -Level "WARNING"
+        }
+    } else {
+        Write-Log "No user quotas specified - skipping quota configuration" -Level "WARNING"
+    }
+
+
+    # Enable Quotas on Volume
+    Write-Log "Enabling quotas on volume $VolumeName"
+    try {
+        Enable-NcQuota -Volume $VolumeName -Vserver $SVMName -ErrorAction Stop
+        Write-Log "Quotas enabled on volume $VolumeName" -Level "SUCCESS"
+    } catch {
+        Write-Log "Failed to enable quotas: $($_.Exception.Message)" -Level "WARNING"
+    }
+
+    # Set NTFS Permissions
+    Write-Log "Configuring NTFS permissions for user directories"
+    
+    # Re-map for permissions configuration
+    net use $TempDrive $ShareUNC /persistent:no | Out-Null
+    
+    try {
+        # Set restrictive permissions on volume root
+        Write-Log "Setting volume root permissions (restrictive access)"
+        
+        $rootAcl = Get-Acl -Path $TempDrive
+        $rootAcl.SetAccessRuleProtection($true, $false)
+        
+        # Add System and Administrators with full control
+        $systemRule = New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+        $adminRule = New-Object System.Security.AccessControl.FileSystemAccessRule("BUILTIN\Administrators", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+        
+        # Add Domain Users with traverse permissions only (to reach their own directory)
+        $traverseRule = New-Object System.Security.AccessControl.FileSystemAccessRule("$Domain\Domain Users", "Traverse", "None", "None", "Allow")
+        
+        $rootAcl.AddAccessRule($systemRule)
+        $rootAcl.AddAccessRule($adminRule)
+        $rootAcl.AddAccessRule($traverseRule)
+        
+        Set-Acl -Path $TempDrive -AclObject $rootAcl
+        Write-Log "Volume root permissions configured" -Level "SUCCESS"
+        
+        # Set individual user directory permissions
+        foreach ($username in $UserList) {
+            $userPath = "$TempDrive\$username"
+            $domainUser = "$Domain\$username"
+            
+            Write-Log "Setting permissions for $domainUser"
+            
+            $userAcl = Get-Acl -Path $userPath
+            $userAcl.SetAccessRuleProtection($true, $false)
+            
+            # Add System, Administrators, and the specific user
+            $userSystemRule = New-Object System.Security.AccessControl.FileSystemAccessRule("NT AUTHORITY\SYSTEM", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+            $userAdminRule = New-Object System.Security.AccessControl.FileSystemAccessRule("BUILTIN\Administrators", "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+            $userRule = New-Object System.Security.AccessControl.FileSystemAccessRule($domainUser, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+            
+            $userAcl.AddAccessRule($userSystemRule)
+            $userAcl.AddAccessRule($userAdminRule)
+            $userAcl.AddAccessRule($userRule)
+            
+            Set-Acl -Path $userPath -AclObject $userAcl
+            Write-Log "Permissions set for $domainUser" -Level "SUCCESS"
+        }
+    } finally {
+        # Disconnect mapped drive
+        net use $TempDrive /delete /y 2>$null | Out-Null
+    }
+
+    # Configure Active Directory User Profiles
+    Write-Log "Configuring Active Directory user profiles"
+    try {
+        Import-Module ActiveDirectory -ErrorAction Stop
+        
+        foreach ($username in $UserList) {
+            # With %w share name, users access \\server\username directly
+            $homePath = "\\$($CIFSServer.CifsServer)\$username"
+            
+            try {
+                Set-ADUser -Identity $username -HomeDrive "H:" -HomeDirectory $homePath -ErrorAction Stop
+                Write-Log "AD home directory set for $username`: $homePath" -Level "SUCCESS"
+            } catch {
+                Write-Log "Failed to set AD home directory for $username`: $($_.Exception.Message)" -Level "WARNING"
+            }
+        }
+    } catch {
+        Write-Log "ActiveDirectory module not available. Manual AD configuration required." -Level "WARNING"
+        Write-Host "`nManual AD Configuration Required:" -ForegroundColor Yellow
+        foreach ($username in $UserList) {
+            Write-Host "  Set $username home directory to: \\$($CIFSServer.CifsServer)\$username" -ForegroundColor White
+        }
+    }
+
+    # Create Snapshot Policy
+    # Write-Log "Creating snapshot policy for home directories"
+    # try {
+    #     $SnapshotPolicy = "home_dir_policy"
+    #     $ExistingPolicy = Get-NcSnapshotPolicy -Name $SnapshotPolicy -Vserver $SVMName -ErrorAction SilentlyContinue
+        
+    #     if (-not $ExistingPolicy) {
+    #         $PolicyParams = @{
+    #             Name = $SnapshotPolicy
+    #             Vserver = $SVMName
+    #             Enabled = $true
+    #         }
+    #         New-NcSnapshotPolicy @PolicyParams -ErrorAction Stop
+            
+    #         # Add schedules to policy
+    #         Add-NcSnapshotPolicySchedule -Policy $SnapshotPolicy -Schedule "hourly" -Count 6 -Vserver $SVMName
+    #         Add-NcSnapshotPolicySchedule -Policy $SnapshotPolicy -Schedule "daily" -Count 30 -Vserver $SVMName  
+    #         Add-NcSnapshotPolicySchedule -Policy $SnapshotPolicy -Schedule "weekly" -Count 12 -Vserver $SVMName
+            
+    #         # Apply policy to volume
+    #         Set-NcVol -Name $VolumeName -SnapshotPolicy $SnapshotPolicy -Vserver $SVMName
+            
+    #         Write-Log "Snapshot policy created and applied" -Level "SUCCESS"
+    #     } else {
+    #         Write-Log "Snapshot policy already exists" -Level "WARNING"
+    #     }
+    # } catch {
+    #     Write-Log "Failed to create snapshot policy: $($_.Exception.Message)" -Level "WARNING"
+    # }
+
+    # Generate Summary Report
+    Write-Log "Generating configuration summary" -Level "SUCCESS"
+    Write-Host "`n" -ForegroundColor Green
+    Write-Host "=== DYNAMIC HOME DIRECTORY CONFIGURATION COMPLETE ===" -ForegroundColor Green
+    Write-Host "Volume: $VolumeName ($VolumeSize)" -ForegroundColor Cyan
+    Write-Host "Dynamic Share Name: $DynamicShareName" -ForegroundColor Cyan
+    Write-Host "Share Path: $SharePath" -ForegroundColor Cyan
+    Write-Host "Search Path: $SearchPath" -ForegroundColor Cyan
+    Write-Host "Junction Path: $JunctionPath" -ForegroundColor Cyan
+    Write-Host "User Quota: $UserQuota (Soft: $UserSoftQuota)" -ForegroundColor Cyan
+    Write-Host "`nSimplified Dynamic User Access:" -ForegroundColor Yellow
+    
+    foreach ($username in $UserList) {
+        Write-Host "  User '$username' connects to: \\$($CIFSServer.CifsServer)\$username" -ForegroundColor White
+        Write-Host "    (Automatically resolves to: $JunctionPath/$username)" -ForegroundColor Gray
+    }
+    
+    Write-Host "`nHow it works (Simplified %w/%w configuration):" -ForegroundColor Yellow
+    Write-Host "1. Share name '%w' dynamically becomes the username" -ForegroundColor White
+    Write-Host "2. Share path '%w' maps to the username directory" -ForegroundColor White  
+    Write-Host "3. Search path '$SearchPath' is the volume root containing user directories" -ForegroundColor White
+    Write-Host "4. When user 'jsmith' connects to '\\server\jsmith':" -ForegroundColor White
+    Write-Host "   - Share name %w resolves to 'jsmith'" -ForegroundColor Gray
+    Write-Host "   - Share path %w resolves to 'jsmith'" -ForegroundColor Gray
+    Write-Host "   - ONTAP searches '$SearchPath/jsmith'" -ForegroundColor Gray
+    Write-Host "   - User is connected directly to their personal directory" -ForegroundColor Gray
+    
+    Write-Host "`nTest Commands:" -ForegroundColor Yellow
+    foreach ($username in $UserList) {
+        Write-Host "  net use H: \\$($CIFSServer.CifsServer)\$username" -ForegroundColor White
+    }
+    
+    Write-Host "`nNext Steps:" -ForegroundColor Yellow
+    Write-Host "1. Test each user's access with the commands above" -ForegroundColor White
+    Write-Host "2. Verify users can only access their own directories" -ForegroundColor White
+    Write-Host "3. Configure Group Policy for automatic H: drive mapping" -ForegroundColor White
+    Write-Host "4. Monitor quota usage and directory access logs" -ForegroundColor White
+    
+    Write-Log "Simplified dynamic home directory setup completed successfully!" -Level "SUCCESS"
+
+} catch {
+    Write-Log "Script failed: $($_.Exception.Message)" -Level "ERROR"
+    Write-Log "Stack Trace: $($_.ScriptStackTrace)" -Level "ERROR"
+    exit 1
+} finally {
+    # Cleanup any remaining connections
+    if ($Controller) {
+        Write-Log "Disconnecting from ONTAP cluster"
+    }
+}
