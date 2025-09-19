@@ -26,6 +26,8 @@
     Relative Path on the volume where user dirs will be created
 .PARAMETER DynamicShareName
     The dynamic share to be created (usually %w)
+.PARAMETER HomeDriveLetter
+    The Home Drive Letter to be used for the AD User configuration
 .PARAMETER SkipADIntegration
     Skip Active Directory integration and home directory configuration
 
@@ -67,6 +69,9 @@ param(
 
     [Parameter(Mandatory=$false)]
     [string]$DynamicShareName = "%w",
+
+    [Parameter(Mandatory=$false)]
+    [string]$HomeDriveLetter = "H",
 
     [Parameter(Mandatory=$false)]
     [switch]$SkipADIntegration
@@ -354,7 +359,7 @@ try {
                 
                 $ADUserParams = @{
                     Identity = $username
-                    HomeDrive = 'H:'
+                    HomeDrive = "${HomeDriveLetter}:"
                     HomeDirectory = $homePath
                     ErrorAction = 'Stop'
                 }
