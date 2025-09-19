@@ -442,7 +442,7 @@ try {
         
         foreach ($username in $UserList) {
             # With %w share name, users access \\server\username directly
-            $homePath = "\\$($CIFSServer.CifsServer)\\$username"
+            $homePath = "\\$($CIFSServer.CifsServer)\$username"
             
             try {
                 # Verify user exists in AD before setting home directory
@@ -472,11 +472,11 @@ try {
         Write-Host "  • PowerShell Core: Install ActiveDirectory module from PowerShell Gallery" -ForegroundColor White
         Write-Host "`nManual steps to configure home directories:" -ForegroundColor Yellow
         foreach ($username in $UserList) {
-            Write-Host "  Set $username home directory to: \\$($CIFSServer.CifsServer)\\$username" -ForegroundColor White
+            Write-Host "  Set $username home directory to: \\$($CIFSServer.CifsServer)\$username" -ForegroundColor White
         }
         Write-Host "`nPowerShell commands for manual configuration:" -ForegroundColor Yellow
         foreach ($username in $UserList) {
-            Write-Host "  Set-ADUser -Identity '$username' -HomeDrive 'H:' -HomeDirectory '\\$($CIFSServer.CifsServer)\\$username'" -ForegroundColor Gray
+            Write-Host "  Set-ADUser -Identity '$username' -HomeDrive '${HomeDriveLetter}:' -HomeDirectory '\\$($CIFSServer.CifsServer)\$username'" -ForegroundColor Gray
         }
     }
     }
