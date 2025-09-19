@@ -106,6 +106,57 @@ function Import-ActiveDirectoryModule {
     }
 }
 
+# Function to manually configure home directory search path (for troubleshooting)
+function Set-HomeDirSearchPath {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$SearchPath,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$SVMName,
+        
+        [Parameter(Mandatory=$false)]
+        [switch]$Force
+    )
+    
+    Write-Log "Manual search path configuration requested"
+    Write-Log "Search Path: $SearchPath"
+    Write-Log "SVM: $SVMName"
+    
+    try {
+        # Check current search paths
+        $ExistingPaths = Get-NcCifsHomeDirSearchPath -Vserver $SVMName -ErrorAction SilentlyContinue
+        $PathExists = $ExistingPaths | Where-Object { $_.Path -eq $SearchPath }
+        
+        if ($PathExists -and -not $Force) {
+            Write-Log "Search path already exists: $SearchPath" -Level "WARNING"
+            Write-Log "Use -Force to reconfigure if needed" -Level "INFO"
+            return $true
+        }
+        
+        # Add or update the search path
+        Add-NcCifsHomeDirSearchPath -Path $SearchPath -Vserver $SVMName -ErrorAction Stop
+        Write-Log "Search path configured successfully: $SearchPath" -Level "SUCCESS"
+        
+        # Verify
+        Start-Sleep -Seconds 2  # Brief pause for ONTAP to process
+        $VerifyPaths = Get-NcCifsHomeDirSearchPath -Vserver $SVMName -ErrorAction Stop
+        $NewPath = $VerifyPaths | Where-Object { $_.Path -eq $SearchPath }
+        
+        if ($NewPath) {
+            Write-Log "Verification successful: Search path is active" -Level "SUCCESS"
+            return $true
+        } else {
+            Write-Log "Verification failed: Search path may not be active" -Level "ERROR"
+            return $false
+        }
+        
+    } catch {
+        Write-Log "Failed to configure search path: $($_.Exception.Message)" -Level "ERROR"
+        return $false
+    }
+}
+
 # Function to log output with timestamp
 function Write-Log {
     param([string]$Message, [string]$Level = "INFO")
@@ -229,16 +280,57 @@ try {
 
     # Configure Home Directory Search Path
     Write-Log "Configuring home directory search path: $SearchPath"
-    try {
-        $SearchPathParams = @{
-            Path = $SearchPath
-            Vserver = $SVMName
-            ErrorAction = 'Stop'
+    
+    # First check if search path already exists
+    $ExistingSearchPaths = Get-NcCifsHomeDirSearchPath -Vserver $SVMName -ErrorAction SilentlyContinue
+    $SearchPathExists = $ExistingSearchPaths | Where-Object { $_.Path -eq $SearchPath }
+    
+    if ($SearchPathExists) {
+        Write-Log "Home directory search path already exists: $SearchPath" -Level "WARNING"
+    } else {
+        try {
+            $SearchPathParams = @{
+                Path = $SearchPath
+                Vserver = $SVMName
+                ErrorAction = 'Stop'
+            }
+            Add-NcCifsHomeDirSearchPath @SearchPathParams
+            Write-Log "Home directory search path configured: $SearchPath" -Level "SUCCESS"
+            
+            # Verify the search path was added
+            $VerifySearchPaths = Get-NcCifsHomeDirSearchPath -Vserver $SVMName -ErrorAction SilentlyContinue
+            $NewSearchPath = $VerifySearchPaths | Where-Object { $_.Path -eq $SearchPath }
+            if ($NewSearchPath) {
+                Write-Log "Verified search path was added successfully: $SearchPath" -Level "SUCCESS"
+            } else {
+                Write-Log "WARNING: Search path may not have been added properly. Manual verification needed." -Level "WARNING"
+            }
+        } catch {
+            Write-Log "Failed to add home directory search path: $($_.Exception.Message)" -Level "ERROR"
+            Write-Log "This may prevent dynamic home directory functionality from working properly" -Level "ERROR"
+            
+            # Provide troubleshooting information
+            Write-Host "`nTroubleshooting Information:" -ForegroundColor Yellow
+            Write-Host "Search Path: $SearchPath" -ForegroundColor White
+            Write-Host "SVM: $SVMName" -ForegroundColor White
+            Write-Host "Manual command to add search path:" -ForegroundColor Yellow
+            Write-Host "Add-NcCifsHomeDirSearchPath -Path '$SearchPath' -Vserver '$SVMName'" -ForegroundColor Gray
         }
-        Add-NcCifsHomeDirSearchPath @SearchPathParams
-        Write-Log "Home directory search path configured: $SearchPath" -Level "SUCCESS"
+    }
+    
+    # Always show current search paths for verification
+    Write-Log "Current home directory search paths:"
+    try {
+        $CurrentSearchPaths = Get-NcCifsHomeDirSearchPath -Vserver $SVMName -ErrorAction Stop
+        if ($CurrentSearchPaths) {
+            foreach ($path in $CurrentSearchPaths) {
+                Write-Log "  Search Path: $($path.Path)" -Level "INFO"
+            }
+        } else {
+            Write-Log "  No search paths currently configured!" -Level "WARNING"
+        }
     } catch {
-        Write-Log "Home directory search path may already exist: $($_.Exception.Message)" -Level "WARNING"
+        Write-Log "Unable to retrieve current search paths: $($_.Exception.Message)" -Level "ERROR"
     }
 
     # Configure User Quotas (only if quotas are specified)
