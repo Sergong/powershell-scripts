@@ -22,8 +22,13 @@
     Individual user quota limit
 .PARAMETER UserSoftQuota
     Individual user soft quota limit
+.PARAMETER AllUsersPath
+    Relative Path on the volume where user dirs will be created
+.PARAMETER DynamicShareName
+    The dynamice share to be created (usually %w)
+
 .EXAMPLE
-    .\Create-DynamicHomeDirectories.ps1 -ClusterName "cluster1.company.com" -SVMName "svm_cifs" -VolumeName "user_homes" -AggregateName "aggr1" -VolumeSize "10GB" -Domain "COMPANY" -UserList @("jsmith","bmiller","sthomas") -UserQuota "2GB" -UserSoftQuota "2GB"
+    .\Create-DynamicHomeDirectories.ps1 -ClusterName "cluster1.company.com" -SVMName "svm_cifs" -VolumeName "user_homes" -AggregateName "aggr1" -VolumeSize "10GB" -Domain "COMPANY" -AllUsersPath "users" -UserList @("jsmith","bmiller","sthomas") -UserQuota "2GB" -UserSoftQuota "2GB"
 #>
 
 [CmdletBinding()]
@@ -54,18 +59,12 @@ param(
     
     [Parameter(Mandatory=$false)]
     [string]$UserSoftQuota = "",
-    
+
     [Parameter(Mandatory=$false)]
-    [string]$JunctionPath = "/home",
-    
+    [string]$AllUsersPath = "users",
+
     [Parameter(Mandatory=$false)]
-    [string]$DynamicShareName = "%w",
-    
-    [Parameter(Mandatory=$false)]
-    [string]$SharePath = "%w",
-    
-    [Parameter(Mandatory=$false)]
-    [string]$SearchPath = "/home"
+    [string]$DynamicShareName = "%w"
 )
 
 #Requires -Modules DataONTAP
@@ -86,6 +85,11 @@ function Write-Log {
         }
     )
 }
+
+
+$JunctionPath = "/$VolumeName"
+$SearchPath = "/$VolumeName/$AllUsersPath"
+$SharePath = "$AllUsersPath/%w"
 
 try {
     # Connect to ONTAP Cluster
@@ -155,7 +159,7 @@ try {
         
         # Create individual user directories directly under volume root
         foreach ($username in $UserList) {
-            $userPath = "$TempDrive\$username"
+            $userPath = "$TempDrive\$AllUsersPath\$username"
             if (-not (Test-Path $userPath)) {
                 New-Item -Path $userPath -ItemType Directory -Force | Out-Null
                 Write-Log "Created user directory: $username" -Level "SUCCESS"
