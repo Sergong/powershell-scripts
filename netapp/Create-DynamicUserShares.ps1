@@ -25,7 +25,9 @@
 .PARAMETER AllUsersPath
     Relative Path on the volume where user dirs will be created
 .PARAMETER DynamicShareName
-    The dynamice share to be created (usually %w)
+    The dynamic share to be created (usually %w)
+.PARAMETER SkipADIntegration
+    Skip Active Directory integration and home directory configuration
 
 .EXAMPLE
     .\Create-DynamicHomeDirectories.ps1 -ClusterName "cluster1.company.com" -SVMName "svm_cifs" -VolumeName "user_homes" -AggregateName "aggr1" -VolumeSize "10GB" -Domain "COMPANY" -AllUsersPath "users" -UserList @("jsmith","bmiller","sthomas") -UserQuota "2GB" -UserSoftQuota "2GB"
@@ -64,13 +66,40 @@ param(
     [string]$AllUsersPath = "users",
 
     [Parameter(Mandatory=$false)]
-    [string]$DynamicShareName = "%w"
+    [string]$DynamicShareName = "%w",
+
+    [Parameter(Mandatory=$false)]
+    [switch]$SkipADIntegration
 )
 
 #Requires -Modules DataONTAP
 
 # Import NetApp ONTAP PowerShell Toolkit
 Import-Module DataONTAP -ErrorAction Stop
+
+# Function to test and import ActiveDirectory module
+function Import-ActiveDirectoryModule {
+    param(
+        [switch]$Force
+    )
+    
+    try {
+        # Check if ActiveDirectory module is available
+        if (Get-Module -ListAvailable -Name ActiveDirectory) {
+            Write-Log "ActiveDirectory module found, importing..."
+            Import-Module ActiveDirectory -Force:$Force -ErrorAction Stop
+            Write-Log "ActiveDirectory module imported successfully" -Level "SUCCESS"
+            return $true
+        } else {
+            Write-Log "ActiveDirectory module not available on this system" -Level "WARNING"
+            Write-Log "Install RSAT (Remote Server Administration Tools) to enable AD integration" -Level "WARNING"
+            return $false
+        }
+    } catch {
+        Write-Log "Failed to import ActiveDirectory module: $($_.Exception.Message)" -Level "WARNING"
+        return $false
+    }
+}
 
 # Function to log output with timestamp
 function Write-Log {
@@ -116,7 +145,7 @@ try {
 
     # Create Home Directory Volume
     Write-Log "Creating volume: $VolumeName"
-    $ExistingVolume = Get-NcVol -Name $VolumeName -Vserver $SVMName -ErrorAction SilentlyContinue
+    $ExistingVolume = Get-NcVol -Name $VolumeName -VserverContext $SVMName -ErrorAction SilentlyContinue
     if (-not $ExistingVolume) {
         $VolumeParams = @{
             Name = $VolumeName
@@ -124,7 +153,7 @@ try {
             Size = $VolumeSize
             JunctionPath = $JunctionPath
             SecurityStyle = "ntfs"
-            Vserver = $SVMName
+            VserverContext = $SVMName
         }
         New-NcVol @VolumeParams -ErrorAction Stop
         Write-Log "Volume $VolumeName created successfully" -Level "SUCCESS"
@@ -185,7 +214,13 @@ try {
         
         # Set home directory properties
         $ShareProperties = @("homedirectory", "oplocks", "browsable", "changenotify")
-        Set-NcCifsShare -Name $DynamicShareName -ShareProperties $ShareProperties -Vserver $SVMName -ErrorAction Stop
+        $SharePropertiesParams = @{
+            Name = $DynamicShareName
+            ShareProperties = $ShareProperties
+            Vserver = $SVMName
+            ErrorAction = 'Stop'
+        }
+        Set-NcCifsShare @SharePropertiesParams
         
         Write-Log "Dynamic home directory share '$DynamicShareName' created with path '$SharePath'" -Level "SUCCESS"
     } else {
@@ -195,7 +230,12 @@ try {
     # Configure Home Directory Search Path
     Write-Log "Configuring home directory search path: $SearchPath"
     try {
-        Add-NcCifsHomeDirSearchPath -Path $SearchPath -Vserver $SVMName -ErrorAction Stop
+        $SearchPathParams = @{
+            Path = $SearchPath
+            Vserver = $SVMName
+            ErrorAction = 'Stop'
+        }
+        Add-NcCifsHomeDirSearchPath @SearchPathParams
         Write-Log "Home directory search path configured: $SearchPath" -Level "SUCCESS"
     } catch {
         Write-Log "Home directory search path may already exist: $($_.Exception.Message)" -Level "WARNING"
@@ -221,14 +261,19 @@ try {
                 Add-NcQuota @UserQuotaParams -ErrorAction Stop
                 Write-Log "Quota set for $domainUser" -Level "SUCCESS"
             } catch {
-                Write-Log "Failed to set quota for $domainUser`: $($_.Exception.Message)" -Level "WARNING"
+                Write-Log "Failed to set quota for ${domainUser}: $($_.Exception.Message)" -Level "WARNING"
             }
         }
 
         # Enable Quotas on Volume (only if quotas were configured)
         Write-Log "Enabling quotas on volume $VolumeName"
         try {
-            Enable-NcQuota -Volume $VolumeName -Vserver $SVMName -ErrorAction Stop
+            $EnableQuotaParams = @{
+                Volume = $VolumeName
+                Vserver = $SVMName
+                ErrorAction = 'Stop'
+            }
+            Enable-NcQuota @EnableQuotaParams
             Write-Log "Quotas enabled on volume $VolumeName" -Level "SUCCESS"
         } catch {
             Write-Log "Failed to enable quotas: $($_.Exception.Message)" -Level "WARNING"
@@ -238,14 +283,6 @@ try {
     }
 
 
-    # Enable Quotas on Volume
-    Write-Log "Enabling quotas on volume $VolumeName"
-    try {
-        Enable-NcQuota -Volume $VolumeName -Vserver $SVMName -ErrorAction Stop
-        Write-Log "Quotas enabled on volume $VolumeName" -Level "SUCCESS"
-    } catch {
-        Write-Log "Failed to enable quotas: $($_.Exception.Message)" -Level "WARNING"
-    }
 
     # Set NTFS Permissions
     Write-Log "Configuring NTFS permissions for user directories"
@@ -276,7 +313,7 @@ try {
         
         # Set individual user directory permissions
         foreach ($username in $UserList) {
-            $userPath = "$TempDrive\$username"
+            $userPath = "$TempDrive\\$AllUsersPath\\$username"
             $domainUser = "$Domain\$username"
             
             Write-Log "Setting permissions for $domainUser"
@@ -302,27 +339,54 @@ try {
     }
 
     # Configure Active Directory User Profiles
-    Write-Log "Configuring Active Directory user profiles"
-    try {
-        Import-Module ActiveDirectory -ErrorAction Stop
+    if ($SkipADIntegration) {
+        Write-Log "Skipping Active Directory integration (SkipADIntegration specified)" -Level "WARNING"
+    } else {
+        Write-Log "Configuring Active Directory user profiles"
+        $ADModuleAvailable = Import-ActiveDirectoryModule
+    
+    if ($ADModuleAvailable) {
+        Write-Log "Proceeding with automatic AD user profile configuration"
         
         foreach ($username in $UserList) {
             # With %w share name, users access \\server\username directly
-            $homePath = "\\$($CIFSServer.CifsServer)\$username"
+            $homePath = "\\$($CIFSServer.CifsServer)\\$username"
             
             try {
-                Set-ADUser -Identity $username -HomeDrive "H:" -HomeDirectory $homePath -ErrorAction Stop
-                Write-Log "AD home directory set for $username`: $homePath" -Level "SUCCESS"
+                # Verify user exists in AD before setting home directory
+                $ADUser = Get-ADUser -Identity $username -ErrorAction Stop
+                Write-Log "Found AD user: $username ($($ADUser.Name))"
+                
+                $ADUserParams = @{
+                    Identity = $username
+                    HomeDrive = 'H:'
+                    HomeDirectory = $homePath
+                    ErrorAction = 'Stop'
+                }
+                Set-ADUser @ADUserParams
+                Write-Log "AD home directory set for ${username}: $homePath" -Level "SUCCESS"
+            } catch [Microsoft.ActiveDirectory.Management.ADIdentityNotFoundException] {
+                Write-Log "User $username not found in Active Directory" -Level "WARNING"
             } catch {
-                Write-Log "Failed to set AD home directory for $username`: $($_.Exception.Message)" -Level "WARNING"
+                Write-Log "Failed to set AD home directory for ${username}: $($_.Exception.Message)" -Level "WARNING"
             }
         }
-    } catch {
+    } else {
         Write-Log "ActiveDirectory module not available. Manual AD configuration required." -Level "WARNING"
         Write-Host "`nManual AD Configuration Required:" -ForegroundColor Yellow
+        Write-Host "To enable automatic AD integration, install one of the following:" -ForegroundColor Yellow
+        Write-Host "  • Windows: Install RSAT (Remote Server Administration Tools)" -ForegroundColor White
+        Write-Host "  • Windows Server: Add 'AD DS and AD LDS Tools' feature" -ForegroundColor White
+        Write-Host "  • PowerShell Core: Install ActiveDirectory module from PowerShell Gallery" -ForegroundColor White
+        Write-Host "`nManual steps to configure home directories:" -ForegroundColor Yellow
         foreach ($username in $UserList) {
-            Write-Host "  Set $username home directory to: \\$($CIFSServer.CifsServer)\$username" -ForegroundColor White
+            Write-Host "  Set $username home directory to: \\$($CIFSServer.CifsServer)\\$username" -ForegroundColor White
         }
+        Write-Host "`nPowerShell commands for manual configuration:" -ForegroundColor Yellow
+        foreach ($username in $UserList) {
+            Write-Host "  Set-ADUser -Identity '$username' -HomeDrive 'H:' -HomeDirectory '\\$($CIFSServer.CifsServer)\\$username'" -ForegroundColor Gray
+        }
+    }
     }
 
     # Create Snapshot Policy
