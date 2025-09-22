@@ -183,7 +183,7 @@ try {
                     continue
                 }
 
-                # Build share parameters
+                # Build share parameters - exclude REST-incompatible parameters
                 $ShareParams = @{
                     Controller = $TargetController
                     VserverContext = $TargetSVM
@@ -191,15 +191,25 @@ try {
                     Path = $Share.Path
                 }
                 
+                # Add basic parameters that are REST API compatible
                 if ($Share.Comment) { $ShareParams.Comment = $Share.Comment }
-                if ($Share.ShareProperties) { $ShareParams.ShareProperties = $Share.ShareProperties }
-                if ($Share.SymlinkProperties) { $ShareParams.SymlinkProperties = $Share.SymlinkProperties }
                 if ($Share.FileUmask) { $ShareParams.FileUmask = $Share.FileUmask }
                 if ($Share.DirUmask) { $ShareParams.DirUmask = $Share.DirUmask }
                 if ($Share.OfflineFilesMode) { $ShareParams.OfflineFilesMode = $Share.OfflineFilesMode }
                 if ($Share.AttributeCacheTtl) { $ShareParams.AttributeCacheTtl = $Share.AttributeCacheTtl }
-                if ($Share.VscanProfile) { $ShareParams.VscanProfile = $Share.VscanProfile }
+                
+                # Store REST-incompatible parameters for logging/warning purposes
+                $SkippedProperties = @()
+                if ($Share.ShareProperties) { $SkippedProperties += "ShareProperties" }
+                if ($Share.SymlinkProperties) { $SkippedProperties += "SymlinkProperties" }
+                if ($Share.VscanProfile) { $SkippedProperties += "VscanProfile" }
+                
+                if ($SkippedProperties.Count -gt 0) {
+                    Write-Log "[WARNING] Skipping REST-incompatible properties for share $ShareName`: $($SkippedProperties -join ', ')" "WARNING"
+                    Write-Log "[INFO] These properties may need manual configuration via ONTAP CLI or System Manager" "WARNING"
+                }
 
+                # Create the share with REST-compatible parameters only
                 Add-NcCifsShare @ShareParams
                 Write-Log "[OK] Successfully created CIFS $ShareType share: $ShareName"
                 $SharesCreated++
@@ -261,6 +271,10 @@ try {
     Write-Log "  - Dynamic Shares: $DynamicSharesImported"
     Write-Log "  - Static Shares: $StaticSharesImported"
     Write-Log "ACLs Created: $ACLsCreated"
+    Write-Log ""
+    Write-Log "[NOTE] Advanced share properties (ShareProperties, SymlinkProperties, VscanProfile)" "INFO"
+    Write-Log "       are not supported via REST API and were skipped during import." "INFO"
+    Write-Log "       Configure these manually via ONTAP CLI or System Manager if needed." "INFO"
     
 } catch {
     Write-Log "Import failed with error: $($_.Exception.Message)" "ERROR"
@@ -289,4 +303,6 @@ Write-Host "Total Shares Imported: $SharesCreated" -ForegroundColor Green
 Write-Host "  Dynamic Shares: $DynamicSharesImported" -ForegroundColor Cyan
 Write-Host "  Static Shares: $StaticSharesImported" -ForegroundColor Cyan
 Write-Host "ACLs Imported: $ACLsCreated" -ForegroundColor Green
-Write-Host "Import Log: $LogFile" -ForegroundColor Yellow
+Write-Host "`nNOTE: Advanced share properties were skipped due to REST API limitations." -ForegroundColor Yellow
+Write-Host "Configure ShareProperties, SymlinkProperties, VscanProfile manually if needed." -ForegroundColor Yellow
+Write-Host "`nImport Log: $LogFile" -ForegroundColor Yellow

@@ -60,6 +60,12 @@ Import-Module NetApp.ONTAP
 .\Import-ONTAPCIFSConfiguration.ps1 -ImportPath "C:\Export\svm_name_Export_timestamp" -TargetCluster "target-cluster.domain.com" -TargetSVM "target_svm" -BreakSnapMirrors -WhatIf
 ```
 
+### Configure Advanced CIFS Properties (Post-Import)
+```powershell
+# Configure ShareProperties, SymlinkProperties, and VscanProfile that aren't supported via REST API
+.\Set-ONTAPCIFSAdvancedProperties.ps1 -ImportPath "C:\Export\svm_name_Export_timestamp" -TargetCluster "target-cluster.domain.com" -TargetSVM "target_svm" -WhatIf
+```
+
 ### CIFS SVM Takeover
 ```powershell
 .\Invoke-CIFSSVMTakeover.ps1 -SourceCluster "source.domain.com" -TargetCluster "target.domain.com" -SourceSVM "source_svm" -TargetSVM "target_svm" -SourceLIFNames @("lif1", "lif2") -TargetLIFNames @("target_lif1", "target_lif2") -WhatIf
@@ -106,8 +112,9 @@ terraform apply
 
 ### Required Modules
 - NetApp.ONTAP PowerShell Toolkit
-- ActiveDirectory (for DNS replication scripts)
+- ActiveDirectory (for DNS replication scripts) 
 - DnsServer (for DNS management scripts)
+- Posh-SSH (for advanced CIFS properties configuration via CLI)
 
 ### Connection Management
 - Scripts establish and tear down ONTAP cluster connections properly
@@ -118,6 +125,12 @@ terraform apply
 - SnapMirror relationship handling with break/quiesce operations
 - Volume and share configuration preservation during migrations
 - Comprehensive backup of configurations before modifications
+
+### REST API Limitations
+- **ShareProperties**, **SymlinkProperties**, and **VscanProfile** are not supported via REST API calls in newer NetApp PowerShell Toolkit versions
+- Import scripts skip these properties and log warnings
+- Use `Set-ONTAPCIFSAdvancedProperties.ps1` to configure these properties via SSH/CLI after import
+- Manual configuration may be required via ONTAP System Manager or CLI for complex scenarios
 
 ## Testing and Validation
 
