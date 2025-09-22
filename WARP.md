@@ -20,10 +20,12 @@ This repository contains PowerShell scripts and utilities organized by functiona
 #### NetApp ONTAP Scripts
 The `netapp/` directory contains enterprise-grade scripts for ONTAP cluster management:
 
-- **Export/Import Pipeline**: `Export-ONTAPCIFSConfiguration.ps1` → `Import-ONTAPCIFSConfiguration.ps1`
-  - Exports complete CIFS SVM configurations including shares, ACLs, and volume information
-  - Imports configurations to target clusters with validation and rollback capabilities
-  - Supports SnapMirror relationship handling and comprehensive logging
+- **Export/Takeover Pipeline**: `Export-ONTAPCIFSConfiguration.ps1` → `Invoke-CIFSSVMTakeover.ps1`
+  - Exports CIFS SVM configurations including shares, ACLs, and volume information  
+  - Invoke script handles complete cutover: SnapMirror break, volume mounting, share/ACL creation, and LIF IP migration
+  - **ZAPI Integration**: Automatically configures advanced share properties (OpLocks, ChangeNotify, ABE, etc.)
+  - **Complete solution**: No additional scripts needed for CIFS migration
+  - Supports comprehensive logging and `-WhatIf` dry run capabilities
 
 - **CIFS SVM Takeover**: `Invoke-CIFSSVMTakeover.ps1`
   - Orchestrates CIFS service migration between SVMs
@@ -50,26 +52,29 @@ Install-Module NetApp.ONTAP -Force
 Import-Module NetApp.ONTAP
 ```
 
-### Export CIFS Configuration
+### CIFS Migration Workflow (Simple 2-Step Process)
+
+#### Step 1: Export CIFS Configuration
 ```powershell
-.\Export-ONTAPCIFSConfiguration.ps1 -SourceCluster "cluster.domain.com" -SourceSVM "svm_name" -ExportPath "C:\Export" -IncludeSnapMirrorInfo
+.\Export-ONTAPCIFSConfiguration.ps1 -SourceCluster "cluster.domain.com" -SourceSVM "svm_name" -ExportPath "C:\Export"
 ```
 
-### Import CIFS Configuration
+#### Step 2: Execute Complete Takeover
 ```powershell
-.\Import-ONTAPCIFSConfiguration.ps1 -ImportPath "C:\Export\svm_name_Export_timestamp" -TargetCluster "target-cluster.domain.com" -TargetSVM "target_svm" -BreakSnapMirrors -WhatIf
+# Complete CIFS migration: SnapMirror break, volume mounting, share/ACL creation, 
+# advanced properties configuration, and LIF IP migration - all in one script
+.\Invoke-CIFSSVMTakeover.ps1 -SourceCluster "source.domain.com" -TargetCluster "target.domain.com" -SourceSVM "source_svm" -TargetSVM "target_svm" -ExportPath "C:\Export\svm_name_Export_timestamp" -WhatIf
 ```
 
-### Configure Advanced CIFS Properties (Post-Import)
-```powershell
-# Configure ShareProperties, SymlinkProperties, and VscanProfile that aren't supported via REST API
-.\Set-ONTAPCIFSAdvancedProperties.ps1 -ImportPath "C:\Export\svm_name_Export_timestamp" -TargetCluster "target-cluster.domain.com" -TargetSVM "target_svm" -WhatIf
-```
+**That's it! Complete CIFS migration in just 2 steps.**
 
-### CIFS SVM Takeover
-```powershell
-.\Invoke-CIFSSVMTakeover.ps1 -SourceCluster "source.domain.com" -TargetCluster "target.domain.com" -SourceSVM "source_svm" -TargetSVM "target_svm" -SourceLIFNames @("lif1", "lif2") -TargetLIFNames @("target_lif1", "target_lif2") -WhatIf
-```
+#### Features Included:
+- ✅ **Automatic volume mounting** after SnapMirror break
+- ✅ **Complete share recreation** with all exported settings
+- ✅ **ACL application** with proper permissions
+- ✅ **Advanced properties** (OpLocks, ChangeNotify, ABE, etc.) via ZAPI
+- ✅ **LIF IP migration** for seamless client transition
+- ✅ **WhatIf support** for safe testing before execution
 
 ### Terraform NetApp Deployment
 ```bash
@@ -111,10 +116,9 @@ terraform apply
 ## NetApp ONTAP Integration
 
 ### Required Modules
-- NetApp.ONTAP PowerShell Toolkit
+- NetApp.ONTAP PowerShell Toolkit (supports both REST API and ZAPI)
 - ActiveDirectory (for DNS replication scripts) 
 - DnsServer (for DNS management scripts)
-- Posh-SSH (for advanced CIFS properties configuration via CLI)
 
 ### Connection Management
 - Scripts establish and tear down ONTAP cluster connections properly
@@ -126,11 +130,17 @@ terraform apply
 - Volume and share configuration preservation during migrations
 - Comprehensive backup of configurations before modifications
 
-### REST API Limitations
+### REST API Limitations (Now Solved)
 - **ShareProperties**, **SymlinkProperties**, and **VscanProfile** are not supported via REST API calls in newer NetApp PowerShell Toolkit versions
-- Import scripts skip these properties and log warnings
-- Use `Set-ONTAPCIFSAdvancedProperties.ps1` to configure these properties via SSH/CLI after import
-- Manual configuration may be required via ONTAP System Manager or CLI for complex scenarios
+- **Solution**: Invoke script now uses ZAPI (Invoke-NcSystemApi) to configure these properties automatically
+- **Properties supported**: OpLocks, ChangeNotify, AccessBasedEnumeration, Browsable, ShowSnapshot, and more
+- **No manual intervention** required - advanced properties are applied during share creation
+
+### Simplified Workflow (Volume Mounting Dependency Solution)
+- **Previous workflow issue**: Import script would fail when trying to create shares on unmounted volumes (SnapMirror DP volumes)
+- **Solution**: Invoke script now reads exported configuration directly and handles everything in one operation
+- **Sequence**: SnapMirror break → Volume mounting → Share/ACL creation → IP migration → Source CIFS disable
+- **Result**: Simple 2-step process (Export → Invoke) with optional advanced properties configuration
 
 ## Testing and Validation
 

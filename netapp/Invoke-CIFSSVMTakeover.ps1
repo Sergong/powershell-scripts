@@ -138,6 +138,104 @@ function Write-Log {
     Add-Content -Path $LogFile -Value $LogEntry
 }
 
+# ZAPI function to set advanced CIFS share properties not supported by REST API
+function Set-ZapiCifsShareProperties {
+    param(
+        [Parameter(Mandatory=$true)]
+        $Controller,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$VserverContext,
+        
+        [Parameter(Mandatory=$true)]
+        [string]$ShareName,
+        
+        [Parameter(Mandatory=$true)]
+        [string[]]$Properties
+    )
+    
+    try {
+        # Build ZAPI XML for cifs-share-properties-modify
+        $propertyElements = $Properties | ForEach-Object { "<property>$_</property>" }
+        $zapiXml = @"
+<cifs-share-properties-modify>
+    <vserver>$VserverContext</vserver>
+    <share-name>$ShareName</share-name>
+    <share-properties>
+        $($propertyElements -join '')
+    </share-properties>
+</cifs-share-properties-modify>
+"@
+        
+        Write-Log "[ZAPI] Setting advanced properties for share '$ShareName': $($Properties -join ', ')"
+        
+        # Execute ZAPI call
+        $result = Invoke-NcSystemApi -Controller $Controller -Request $zapiXml
+        
+        if ($result) {
+            Write-Log "[OK] Successfully set advanced properties for share '$ShareName' via ZAPI"
+            return $true
+        } else {
+            Write-Log "[NOK] ZAPI call returned no result for share '$ShareName'" "WARNING"
+            return $false
+        }
+        
+    } catch {
+        Write-Log "[NOK] Failed to set advanced properties via ZAPI for share '${ShareName}': $($_.Exception.Message)" "ERROR"
+        return $false
+    }
+}
+
+# Function to convert exported share properties to ZAPI format
+function Convert-SharePropertiesToZapi {
+    param(
+        [Parameter(Mandatory=$false)]
+        [array]$ShareProperties,
+        
+        [Parameter(Mandatory=$false)]
+        [array]$SymlinkProperties,
+        
+        [Parameter(Mandatory=$false)]
+        [array]$VscanProfile
+    )
+    
+    $zapiProperties = @()
+    
+    # Map common ShareProperties to ZAPI property names
+    if ($ShareProperties) {
+        foreach ($prop in $ShareProperties) {
+            switch ($prop.ToLower()) {
+                "oplocks" { $zapiProperties += "oplocks" }
+                "browsable" { $zapiProperties += "browsable" }
+                "showsnapshot" { $zapiProperties += "showsnapshot" }
+                "changenotify" { $zapiProperties += "changenotify" }
+                "homedirectory" { $zapiProperties += "homedirectory" }
+                "attributecache" { $zapiProperties += "attributecache" }
+                "continuously_available" { $zapiProperties += "continuously_available" }
+                "branchcache" { $zapiProperties += "branchcache" }
+                "access_based_enumeration" { $zapiProperties += "access_based_enumeration" }
+                "shadowcopy" { $zapiProperties += "shadowcopy" }
+                default { 
+                    Write-Log "[INFO] Unknown ShareProperty '$prop' - attempting to use as-is" "WARNING"
+                    $zapiProperties += $prop.ToLower()
+                }
+            }
+        }
+    }
+    
+    # Note: SymlinkProperties and VscanProfile may require separate ZAPI calls
+    # For now, log them as requiring manual configuration
+    if ($SymlinkProperties) {
+        Write-Log "[INFO] SymlinkProperties detected: $($SymlinkProperties -join ', ') - may require separate ZAPI call" "INFO"
+    }
+    
+    if ($VscanProfile) {
+        Write-Log "[INFO] VscanProfile detected: $($VscanProfile -join ', ') - may require separate ZAPI call" "INFO"
+    }
+    
+    return $zapiProperties
+}
+
 Write-Log "=== CIFS SVM Takeover and LIF Migration Started ==="
 Write-Log "Source: $SourceCluster -> $SourceSVM"
 Write-Log "Target: $TargetCluster -> $TargetSVM"
@@ -420,7 +518,72 @@ try {
         Write-Log "  Target: $($TargetLIF.Name) ($($TargetLIF.IPAddress)/$($TargetLIF.NetmaskLength)) -> ($($SourceLIF.IPAddress)/$($SourceLIF.NetmaskLength))"
     }
 
-    # Step 11: Final SnapMirror update (after CIFS is offline)
+    # Step 11: Check for active CIFS sessions on source SVM
+    Write-Log "Checking for active CIFS sessions on source SVM..."
+    try {
+        $ActiveSessions = Get-NcCifsSession -Controller $SourceController -VserverContext $SourceSVM
+        if ($ActiveSessions -and $ActiveSessions.Count -gt 0) {
+            Write-Log "[NOK] Found $($ActiveSessions.Count) active CIFS sessions on source SVM" "WARNING"
+            
+            if (!$ForceSourceDisable -and !$WhatIf) {
+                Write-Host "`n[NOK] WARNING: Active CIFS Sessions Detected [NOK]" -ForegroundColor Yellow
+                Write-Host "The following CIFS sessions are currently active on the source SVM:" -ForegroundColor Yellow
+                
+                $ActiveSessions | ForEach-Object {
+                    Write-Host "  - User: $($_.WindowsUser), IP: $($_.Address), Connected: $($_.ConnectedTime)" -ForegroundColor White
+                }
+                
+                Write-Host "`nDisabling the CIFS server will forcefully disconnect these users." -ForegroundColor Red
+                $Proceed = Read-Host "Do you want to proceed with forceful disconnection? (Y/N)"
+                
+                if ($Proceed -ne "Y" -and $Proceed -ne "y") {
+                    Write-Log "Operation cancelled by user due to active CIFS sessions"
+                    exit 1
+                }
+            } elseif ($ForceSourceDisable) {
+                Write-Log "Proceeding with force disable despite active sessions"
+            }
+        } else {
+            Write-Log "[OK] No active CIFS sessions found on source SVM"
+        }
+    } catch {
+        Write-Log "[NOK] Could not check CIFS sessions: $($_.Exception.Message)" "WARNING"
+    }
+
+    # Step 12: Disable CIFS server on source SVM
+    Write-Log "Disabling CIFS server on source SVM..."
+    try {
+        $SourceCifsServer = Get-NcCifsServer -Controller $SourceController -VserverContext $SourceSVM
+        if ($SourceCifsServer) {
+            Write-Log "Found CIFS server: $($SourceCifsServer.CifsServer)"
+            Write-Log "Domain: $($SourceCifsServer.Domain)"
+            Write-Log "Status: $($SourceCifsServer.AdministrativeStatus)"
+            
+            if ($SourceCifsServer.AdministrativeStatus -eq "up") {
+                if (!$WhatIf) {
+                    Write-Log "Stopping CIFS server on source SVM..."
+                    Stop-NcCifsServer -Controller $SourceController -VserverContext $SourceSVM
+                    Write-Log "[OK] CIFS server stopped successfully"
+                    
+                    # Verify the status
+                    Start-Sleep -Seconds 5
+                    $UpdatedCifsServer = Get-NcCifsServer -Controller $SourceController -VserverContext $SourceSVM
+                    Write-Log "CIFS server status after stop: $($UpdatedCifsServer.AdministrativeStatus)"
+                } else {
+                    Write-Log "[WHATIF] Would stop CIFS server on source SVM"
+                }
+            } else {
+                Write-Log "CIFS server is already stopped on source SVM"
+            }
+        } else {
+            Write-Log "[NOK] No CIFS server found on source SVM" "WARNING"
+        }
+    } catch {
+        Write-Log "[NOK] Failed to stop CIFS server: $($_.Exception.Message)" "ERROR"
+        throw
+    }
+
+    # Step 13: Final SnapMirror update (after CIFS is offline)
     if ($SnapMirrorVolumes -and $SnapMirrorVolumes.Count -gt 0 -and !$SkipSnapMirrorBreak) {
         Write-Log "Performing final SnapMirror updates (source CIFS is now offline)..."
         
@@ -471,7 +634,7 @@ try {
         Write-Log "[OK] Final SnapMirror update operations completed"
     }
     
-    # Step 12: Break SnapMirror relationships (if specified)
+    # Step 14: Break SnapMirror relationships (if specified)
     if ($SnapMirrorVolumes -and $SnapMirrorVolumes.Count -gt 0 -and !$SkipSnapMirrorBreak) {
         Write-Log "Breaking SnapMirror relationships after final update..."
         
@@ -509,10 +672,18 @@ try {
                             Write-Log "Breaking SnapMirror: $DestinationPath"
                             Invoke-NcSnapmirrorBreak -Controller $TargetController -Destination $DestinationPath
                             
-                            # Verify break was successful
+                            # Verify break was successful and check volume mounting
                             Start-Sleep -Seconds 5
                             $SMFinal = Get-NcSnapmirror -Controller $TargetController -Destination $DestinationPath
                             Write-Log "[OK] SnapMirror broken successfully: $($SMFinal.Status)"
+                            
+                            # Verify if volume was automatically mounted
+                            $Volume = Get-NcVol -Controller $TargetController -VserverContext $TargetSVM -Name $VolumeName -ErrorAction SilentlyContinue
+                            if ($Volume -and $Volume.JunctionPath -and $Volume.JunctionPath -ne "") {
+                                Write-Log "[OK] Volume '$VolumeName' automatically mounted at: $($Volume.JunctionPath)"
+                            } else {
+                                Write-Log "[INFO] Volume '$VolumeName' not automatically mounted - will mount manually during share creation"
+                            }
                             
                         } else {
                             Write-Log "[OK] SnapMirror already broken: $DestinationPath"
@@ -538,73 +709,195 @@ try {
     } else {
         Write-Log "No SnapMirror volumes specified - continuing without SnapMirror operations"
     }
-
-    # Step 13: Check for active CIFS sessions on source SVM
-    Write-Log "Checking for active CIFS sessions on source SVM..."
-    try {
-        $ActiveSessions = Get-NcCifsSession -Controller $SourceController -VserverContext $SourceSVM
-        if ($ActiveSessions -and $ActiveSessions.Count -gt 0) {
-            Write-Log "[NOK] Found $($ActiveSessions.Count) active CIFS sessions on source SVM" "WARNING"
-            
-            if (!$ForceSourceDisable -and !$WhatIf) {
-                Write-Host "`n[NOK] WARNING: Active CIFS Sessions Detected [NOK]" -ForegroundColor Yellow
-                Write-Host "The following CIFS sessions are currently active on the source SVM:" -ForegroundColor Yellow
+    
+    # Step 15: Mount volumes and create exported CIFS shares and ACLs (after SnapMirror break)
+    if ($ExportPath -and (Test-Path $ExportPath)) {
+        Write-Log "Processing exported CIFS shares and volume mounting..."
+        
+        # Load exported shares and ACLs directly
+        $SharesFile = Join-Path $ExportPath "CIFS-Shares.json"
+        $ACLsFile = Join-Path $ExportPath "CIFS-ShareACLs.json"
+        
+        if ((Test-Path $SharesFile) -and (Test-Path $ACLsFile)) {
+            try {
+                # Load exported shares and ACLs
+                $ExportedShares = Get-Content -Path $SharesFile | ConvertFrom-Json
+                $ExportedACLs = Get-Content -Path $ACLsFile | ConvertFrom-Json
                 
-                $ActiveSessions | ForEach-Object {
-                    Write-Host "  - User: $($_.WindowsUser), IP: $($_.Address), Connected: $($_.ConnectedTime)" -ForegroundColor White
+                # Filter out system shares
+                $SharesForProcessing = $ExportedShares | Where-Object { $_.ShareName -notin @("admin$", "c$", "ipc$") }
+                $ACLsForProcessing = $ExportedACLs | Where-Object { $_.Share -notin @("admin$", "c$", "ipc$") }
+                
+                Write-Log "[OK] Found $($SharesForProcessing.Count) exported shares and $($ACLsForProcessing.Count) exported ACLs"
+                
+                # Derive required junction paths and mount volumes
+                $RequiredJunctions = @{}
+                foreach ($Share in $SharesForProcessing) {
+                    # Only process static shares for volume mounting
+                    if ($Share.Path -and $Share.Path.StartsWith('/') -and !($Share.Path -match '%[wdWD]')) {
+                        $PathParts = $Share.Path.Trim('/').Split('/')
+                        if ($PathParts.Length -gt 0 -and $PathParts[0] -ne "") {
+                            $VolumeName = $PathParts[0]
+                            $JunctionPath = "/" + ($PathParts -join '/')
+                            
+                            # Only store the junction for the root level (volume mount point)
+                            $VolumeJunction = "/" + $VolumeName
+                            if (!$RequiredJunctions.ContainsKey($VolumeName)) {
+                                $RequiredJunctions[$VolumeName] = $VolumeJunction
+                            }
+                        }
+                    }
                 }
                 
-                Write-Host "`nDisabling the CIFS server will forcefully disconnect these users." -ForegroundColor Red
-                $Proceed = Read-Host "Do you want to proceed with forceful disconnection? (Y/N)"
+                Write-Log "[OK] Identified $($RequiredJunctions.Count) volumes that need mounting"
                 
-                if ($Proceed -ne "Y" -and $Proceed -ne "y") {
-                    Write-Log "Operation cancelled by user due to active CIFS sessions"
-                    exit 1
-                }
-            } elseif ($ForceSourceDisable) {
-                Write-Log "Proceeding with force disable despite active sessions"
-            }
-        } else {
-            Write-Log "[OK] No active CIFS sessions found on source SVM"
-        }
-    } catch {
-        Write-Log "[NOK] Could not check CIFS sessions: $($_.Exception.Message)" "WARNING"
-    }
-
-    # Step 14: Disable CIFS server on source SVM
-    Write-Log "Disabling CIFS server on source SVM..."
-    try {
-        $SourceCifsServer = Get-NcCifsServer -Controller $SourceController -VserverContext $SourceSVM
-        if ($SourceCifsServer) {
-            Write-Log "Found CIFS server: $($SourceCifsServer.CifsServer)"
-            Write-Log "Domain: $($SourceCifsServer.Domain)"
-            Write-Log "Status: $($SourceCifsServer.AdministrativeStatus)"
-            
-            if ($SourceCifsServer.AdministrativeStatus -eq "up") {
-                if (!$WhatIf) {
-                    Write-Log "Stopping CIFS server on source SVM..."
-                    Stop-NcCifsServer -Controller $SourceController -VserverContext $SourceSVM
-                    Write-Log "[OK] CIFS server stopped successfully"
+                # Mount volumes if they're not already mounted
+                foreach ($VolumeName in $RequiredJunctions.Keys) {
+                    $JunctionPath = $RequiredJunctions[$VolumeName]
                     
-                    # Verify the status
-                    Start-Sleep -Seconds 5
-                    $UpdatedCifsServer = Get-NcCifsServer -Controller $SourceController -VserverContext $SourceSVM
-                    Write-Log "CIFS server status after stop: $($UpdatedCifsServer.AdministrativeStatus)"
-                } else {
-                    Write-Log "[WHATIF] Would stop CIFS server on source SVM"
+                    if (!$WhatIf) {
+                        try {
+                            # Check if volume is already mounted
+                            $Volume = Get-NcVol -Controller $TargetController -VserverContext $TargetSVM -Name $VolumeName -ErrorAction SilentlyContinue
+                            if ($Volume) {
+                                if ($Volume.JunctionPath -and $Volume.JunctionPath -ne "") {
+                                    Write-Log "[OK] Volume '$VolumeName' already mounted at: $($Volume.JunctionPath)"
+                                } else {
+                                    Write-Log "Mounting volume '$VolumeName' at junction: $JunctionPath"
+                                    Set-NcVol -Controller $TargetController -VserverContext $TargetSVM -Name $VolumeName -JunctionPath $JunctionPath
+                                    Write-Log "[OK] Successfully mounted volume '$VolumeName' at: $JunctionPath"
+                                }
+                            } else {
+                                Write-Log "[NOK] Volume '$VolumeName' not found on target SVM" "ERROR"
+                            }
+                        } catch {
+                            Write-Log "[NOK] Failed to mount volume '$VolumeName': $($_.Exception.Message)" "ERROR"
+                        }
+                    } else {
+                        Write-Log "[WHATIF] Would mount volume '$VolumeName' at junction: $JunctionPath"
+                    }
                 }
-            } else {
-                Write-Log "CIFS server is already stopped on source SVM"
+                
+                # Create CIFS shares from export
+                Write-Log "Creating exported CIFS shares..."
+                $SharesCreated = 0
+                
+                foreach ($Share in $SharesForProcessing) {
+                    $ShareName = $Share.ShareName
+                    $ShareType = if ($Share.Path -match '%[wdWD]') { "dynamic" } else { "static" }
+                    
+                    Write-Log "Creating exported CIFS $ShareType share: $ShareName at path: $($Share.Path)"
+                    
+                    if (!$WhatIf) {
+                        try {
+                            # Check if share already exists
+                            $ExistingShare = Get-NcCifsShare -Controller $TargetController -VserverContext $TargetSVM -Name $ShareName -ErrorAction SilentlyContinue
+                            if ($ExistingShare) {
+                                Write-Log "[WARNING] Share '$ShareName' already exists, skipping..." "WARNING"
+                                continue
+                            }
+
+                            # Build share parameters (REST-compatible only)
+                            $ShareParams = @{
+                                Controller = $TargetController
+                                VserverContext = $TargetSVM
+                                Name = $ShareName
+                                Path = $Share.Path
+                            }
+                            
+                            # Add basic parameters that are REST API compatible
+                            if ($Share.Comment) { $ShareParams.Comment = $Share.Comment }
+                            if ($Share.FileUmask) { $ShareParams.FileUmask = $Share.FileUmask }
+                            if ($Share.DirUmask) { $ShareParams.DirUmask = $Share.DirUmask }
+                            if ($Share.OfflineFilesMode) { $ShareParams.OfflineFilesMode = $Share.OfflineFilesMode }
+                            if ($Share.AttributeCacheTtl) { $ShareParams.AttributeCacheTtl = $Share.AttributeCacheTtl }
+                            
+                            # Create the basic share first
+                            Add-NcCifsShare @ShareParams
+                            Write-Log "[OK] Successfully created CIFS $ShareType share: $ShareName"
+                            
+                            # Configure advanced properties via ZAPI if needed
+                            $AdvancedPropsSet = $false
+                            if ($Share.ShareProperties -or $Share.SymlinkProperties -or $Share.VscanProfile) {
+                                Write-Log "[INFO] Configuring advanced properties for share: $ShareName"
+                                
+                                try {
+                                    # Convert exported properties to ZAPI format
+                                    $ZapiProperties = Convert-SharePropertiesToZapi -ShareProperties $Share.ShareProperties -SymlinkProperties $Share.SymlinkProperties -VscanProfile $Share.VscanProfile
+                                    
+                                    if ($ZapiProperties.Count -gt 0) {
+                                        # Set advanced properties via ZAPI
+                                        $AdvancedPropsSet = Set-ZapiCifsShareProperties -Controller $TargetController -VserverContext $TargetSVM -ShareName $ShareName -Properties $ZapiProperties
+                                        
+                                        if ($AdvancedPropsSet) {
+                                            Write-Log "[OK] Advanced properties configured via ZAPI for share: $ShareName"
+                                        } else {
+                                            Write-Log "[NOK] Failed to configure some advanced properties for share: $ShareName" "WARNING"
+                                        }
+                                    } else {
+                                        Write-Log "[INFO] No mappable advanced properties found for share: $ShareName" "INFO"
+                                    }
+                                    
+                                } catch {
+                                    Write-Log "[NOK] Error configuring advanced properties for share ${ShareName}: $($_.Exception.Message)" "ERROR"
+                                }
+                            }
+                            
+                            $SharesCreated++
+                            
+                            # Remove default Everyone permission
+                            try {
+                                Remove-NcCifsShareAcl -Controller $TargetController -VserverContext $TargetSVM -Share $ShareName -UserOrGroup "Everyone" -ErrorAction SilentlyContinue
+                                Write-Log "[OK] Removed default Everyone permission for: $ShareName"
+                            } catch {
+                                Write-Log "[NOK] Could not remove Everyone permission for $ShareName" "WARNING"
+                            }
+                            
+                        } catch {
+                            Write-Log "[NOK] Failed to create CIFS share $ShareName`: $($_.Exception.Message)" "ERROR"
+                        }
+                    } else {
+                        Write-Log "[WHATIF] Would create deferred CIFS $ShareType share: $ShareName at path: $($Share.Path)"
+                    }
+                }
+                
+                # Apply exported ACLs
+                Write-Log "Applying exported CIFS share ACLs..."
+                $ACLsCreated = 0
+                
+                foreach ($ACL in $ACLsForProcessing) {
+                    $ShareName = $ACL.Share
+                    Write-Log "Adding exported ACL for share '$ShareName': $($ACL.UserOrGroup) = $($ACL.Permission)"
+                    
+                    if (!$WhatIf) {
+                        try {
+                            Add-NcCifsShareAcl -Controller $TargetController -VserverContext $TargetSVM -Share $ShareName -UserOrGroup $ACL.UserOrGroup -Permission $ACL.Permission -UserGroupType $ACL.UserGroupType
+                            Write-Log "[OK] Successfully added exported ACL for share: $ShareName"
+                            $ACLsCreated++
+                        } catch {
+                            Write-Log "[NOK] Failed to add exported ACL for share $ShareName`: $($_.Exception.Message)" "ERROR"
+                        }
+                    } else {
+                        Write-Log "[WHATIF] Would add exported ACL: $($ACL.UserOrGroup) = $($ACL.Permission) to share: $ShareName"
+                    }
+                }
+                
+                Write-Log "[OK] Exported CIFS configuration applied - Shares: $SharesCreated, ACLs: $ACLsCreated" "SUCCESS"
+                Write-Log "[INFO] Advanced share properties (ShareProperties, SymlinkProperties, VscanProfile) configured via ZAPI where applicable" "INFO"
+                
+            } catch {
+                Write-Log "[NOK] Failed to process exported CIFS configuration: $($_.Exception.Message)" "ERROR"
             }
+            
         } else {
-            Write-Log "[NOK] No CIFS server found on source SVM" "WARNING"
+            Write-Log "[INFO] No exported shares/ACLs found - check export files in path: $ExportPath" "WARNING"
         }
-    } catch {
-        Write-Log "[NOK] Failed to stop CIFS server: $($_.Exception.Message)" "ERROR"
-        throw
+        
+    } else {
+        Write-Log "[INFO] No export path specified - skipping CIFS share processing"
     }
 
-    # Step 15: Take source LIFs administratively down
+    # Step 16: Take source LIFs administratively down
     Write-Log "Taking source LIFs administratively down..."
     for ($i = 0; $i -lt $SourceLIFInfo.Count; $i++) {
         $SourceLIF = $SourceLIFInfo[$i]
@@ -626,7 +919,7 @@ try {
         }
     }
 
-    # Step 16: Update target LIF IP addresses
+    # Step 17: Update target LIF IP addresses
     Write-Log "Updating target LIF IP addresses..."
     for ($i = 0; $i -lt $SourceLIFInfo.Count; $i++) {
         $SourceLIF = $SourceLIFInfo[$i]
@@ -679,7 +972,7 @@ try {
         }
     }
 
-    # Step 17: Verify target SVM CIFS server is running
+    # Step 18: Verify target SVM CIFS server is running
     Write-Log "Verifying target SVM CIFS server status..."
     try {
         $TargetCifsServer = Get-NcCifsServer -Controller $TargetController -VserverContext $TargetSVM
@@ -757,4 +1050,5 @@ Write-Host "`nNext Steps:" -ForegroundColor Yellow
 Write-Host "1. Test connectivity to the new IP addresses" -ForegroundColor White
 Write-Host "2. Update DNS records if necessary" -ForegroundColor White
 Write-Host "3. Verify CIFS shares are accessible via target SVM" -ForegroundColor White
-Write-Host "4. Monitor for any client connection issues" -ForegroundColor White
+Write-Host "4. Verify advanced share properties were applied correctly (OpLocks, ChangeNotify, ABE, etc.)" -ForegroundColor White
+Write-Host "5. Monitor for any client connection issues" -ForegroundColor White
