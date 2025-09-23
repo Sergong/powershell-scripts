@@ -134,7 +134,7 @@ function Initialize-OutputFiles {
         return $true
     }
     catch {
-        Write-Log "Failed to initialize output files: $_" "ERROR"
+        Write-Log "Failed to initialize output files: $($_.Exception.Message)" "ERROR"
         return $false
     }
 }
@@ -282,14 +282,15 @@ function Get-CIFSSessionData {
             }
             catch {
                 $SVMDisplayName = if ($SVMName) { $SVMName } else { "<unknown>" }
-                Write-Log "Error collecting sessions for SVM $SVMDisplayName: $_" "ERROR"
+                $ErrorMessage = $_.Exception.Message
+                Write-Log "Error collecting sessions for SVM ${SVMDisplayName}: $ErrorMessage" "ERROR"
             }
         }
         
         return $AllSessions
     }
     catch {
-        Write-Log "Error collecting CIFS session data: $_" "ERROR"
+        Write-Log "Error collecting CIFS session data: $($_.Exception.Message)" "ERROR"
         return @()
     }
 }
@@ -331,7 +332,7 @@ function Get-UniqueSessionData {
             $SessionHash = [BitConverter]::ToString($HashBytes) -replace '-',''
             $MD5.Dispose()
         } catch {
-            Write-Log "Error creating session hash for SessionId $($Session.SessionId): $_" "ERROR"
+            Write-Log "Error creating session hash for SessionId $($Session.SessionId): $($_.Exception.Message)" "ERROR"
             # Use a simple fallback hash based on key properties
             $FallbackString = "$($Session.Cluster)|$($Session.SVM)|$($Session.SessionId)|$($Session.ClientAddress)|$($Session.OpenFiles)"
             $StringBytes = [System.Text.Encoding]::UTF8.GetBytes($FallbackString)
@@ -375,7 +376,7 @@ function Get-UniqueSessionData {
                 $SessionEndData.Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
                 $SessionEndData.SessionState = "Session Ended"
             } catch {
-                Write-Log "Error creating session end data: $_" "WARNING"
+                Write-Log "Error creating session end data: $($_.Exception.Message)" "WARNING"
                 # Create a minimal session end record
                 $SessionEndData = [PSCustomObject]@{
                     Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -432,7 +433,7 @@ function Save-SessionDataToCsv {
         }
     }
     catch {
-        Write-Log "Error saving session data to CSV: $_" "ERROR"
+        Write-Log "Error saving session data to CSV: $($_.Exception.Message)" "ERROR"
     }
 }
 
@@ -458,7 +459,7 @@ function Stop-Monitoring {
         }
     }
     catch {
-        Write-Log "Warning: Could not properly disconnect from cluster: $_" "WARNING"
+        Write-Log "Warning: Could not properly disconnect from cluster: $($_.Exception.Message)" "WARNING"
     }
     
     Write-Log "CIFS Session Monitoring Stopped" "SUCCESS"
@@ -531,13 +532,13 @@ try {
             }
         }
         catch {
-            Write-Log "Error in monitoring iteration $($script:IterationCount): $_" "ERROR"
+            Write-Log "Error in monitoring iteration $($script:IterationCount): $($_.Exception.Message)" "ERROR"
             Write-Log "Continuing with next iteration..." "WARNING"
         }
     }
 }
 catch {
-    Write-Log "Critical error in main execution: $_" "ERROR"
+    Write-Log "Critical error in main execution: $($_.Exception.Message)" "ERROR"
     exit 1
 }
 finally {
