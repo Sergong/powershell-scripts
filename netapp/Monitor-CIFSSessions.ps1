@@ -206,9 +206,11 @@ function Get-CIFSSessionData {
         $AllSessions = @()
         
         foreach ($SVM in $SVMs) {
+            # Initialize SVM name outside try block for proper scope
+            $SVMName = $null
+            
             try {
                 # Try multiple property names for SVM name
-                $SVMName = $null
                 $PossibleNameProperties = @('Name', 'VserverName', 'Vserver', 'VServer', 'SvmName')
                 foreach ($PropName in $PossibleNameProperties) {
                     if ($SVM.$PropName -and $SVM.$PropName -ne $null) {
