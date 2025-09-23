@@ -272,9 +272,15 @@ try {
     
     # Summary
     Write-Log "=== SUMMARY ===" "SUCCESS"
-    Write-Log "Total SVMs: $SVMCount" "INFO"
+    Write-Log "Total Data SVMs: $SVMCount" "INFO"
     Write-Log "Successfully detected: $(($SuccessfulSVMs | Measure-Object).Count)" "SUCCESS"
-    Write-Log "Failed to detect: $(($FailedSVMs | Measure-Object).Count)" "ERROR"
+    
+    # Only show failed count if there are actual failures
+    $FailedCount = ($FailedSVMs | Measure-Object).Count
+    if ($FailedCount -gt 0) {
+        Write-Log "Failed to detect: $FailedCount" "ERROR"
+    }
+    
     Write-Host ""
     
     if ($SuccessfulSVMs) {
@@ -284,7 +290,8 @@ try {
         }
     }
     
-    if ($FailedSVMs) {
+    # Only show failed SVMs section if there are actual failures
+    if ($FailedSVMs -and $FailedCount -gt 0) {
         Write-Host ""
         Write-Log "Failed SVMs:" "ERROR"
         foreach ($SVM in $FailedSVMs) {
