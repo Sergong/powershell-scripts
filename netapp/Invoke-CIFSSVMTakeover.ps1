@@ -309,9 +309,19 @@ try {
                 
                 # Filter for CIFS LIFs (require admin up status for source since they should be active)
                 $CifsSourceLIFs = $AllSourceLIFs | Where-Object {
-                    ($_.DataProtocols -contains "cifs" -or $_.DataProtocols -contains "smb") -and 
-                    $_.AdministrativeStatus -eq "up" -and
-                    $_.Role -eq "data"
+                    # Check for CIFS/SMB protocols (handle different ONTAP versions)
+                    $HasCifsProtocol = ($_.DataProtocols -contains "cifs") -or 
+                                      ($_.DataProtocols -contains "smb") -or 
+                                      ($_.DataProtocols -contains "data_cifs") -or
+                                      ($_.DataProtocols -join ',' -match 'cifs')
+                    
+                    # Check for data role (handle different ONTAP versions)
+                    $HasDataRole = ($_.Role -eq "data") -or 
+                                  ($_.Role -contains "data") -or 
+                                  ($_.Role -contains "data_cifs") -or
+                                  ($_.Role -match 'data')
+                    
+                    $HasCifsProtocol -and $_.AdministrativeStatus -eq "up" -and $HasDataRole
                 }
                 
                 if ($CifsSourceLIFs) {
@@ -323,9 +333,11 @@ try {
                     }
                 } else {
                     Write-Log "[NOK] No active CIFS/SMB data LIFs found on source SVM: $SourceSVM" "ERROR"
-                    Write-Log "[INFO] Available LIF protocols on source SVM:" "INFO"
+                    Write-Log "[INFO] Available LIFs on source SVM (looking for CIFS/data_cifs protocols + data role):" "INFO"
                     $AllSourceLIFs | ForEach-Object {
-                        Write-Log "  - $($_.InterfaceName): $($_.DataProtocols -join ', ') (Role: $($_.Role), Status: $($_.AdministrativeStatus))" "INFO"
+                        $ProtocolsStr = if ($_.DataProtocols) { $_.DataProtocols -join ',' } else { "none" }
+                        $RoleStr = if ($_.Role -is [array]) { $_.Role -join ' ' } else { $_.Role }
+                        Write-Log "  - $($_.InterfaceName): Protocols=[$ProtocolsStr] Role=[$RoleStr] Status=$($_.AdministrativeStatus)" "INFO"
                     }
                     throw "No active CIFS/SMB data LIFs found on source SVM: $SourceSVM"
                 }
@@ -349,8 +361,19 @@ try {
                 
                 # Filter for CIFS LIFs (don't require admin up status for target)
                 $CifsTargetLIFs = $AllTargetLIFs | Where-Object {
-                    ($_.DataProtocols -contains "cifs" -or $_.DataProtocols -contains "smb") -and 
-                    $_.Role -eq "data"
+                    # Check for CIFS/SMB protocols (handle different ONTAP versions)
+                    $HasCifsProtocol = ($_.DataProtocols -contains "cifs") -or 
+                                      ($_.DataProtocols -contains "smb") -or 
+                                      ($_.DataProtocols -contains "data_cifs") -or
+                                      ($_.DataProtocols -join ',' -match 'cifs')
+                    
+                    # Check for data role (handle different ONTAP versions)
+                    $HasDataRole = ($_.Role -eq "data") -or 
+                                  ($_.Role -contains "data") -or 
+                                  ($_.Role -contains "data_cifs") -or
+                                  ($_.Role -match 'data')
+                    
+                    $HasCifsProtocol -and $HasDataRole
                 }
                 
                 if ($CifsTargetLIFs) {
@@ -362,9 +385,11 @@ try {
                     }
                 } else {
                     Write-Log "[NOK] No CIFS/SMB data LIFs found on target SVM: $TargetSVM" "ERROR"
-                    Write-Log "[INFO] Available LIF protocols on target SVM:" "INFO"
+                    Write-Log "[INFO] Available LIFs on target SVM (looking for CIFS/data_cifs protocols + data role):" "INFO"
                     $AllTargetLIFs | ForEach-Object {
-                        Write-Log "  - $($_.InterfaceName): $($_.DataProtocols -join ', ') (Role: $($_.Role))" "INFO"
+                        $ProtocolsStr = if ($_.DataProtocols) { $_.DataProtocols -join ',' } else { "none" }
+                        $RoleStr = if ($_.Role -is [array]) { $_.Role -join ' ' } else { $_.Role }
+                        Write-Log "  - $($_.InterfaceName): Protocols=[$ProtocolsStr] Role=[$RoleStr] Status=$($_.AdministrativeStatus)" "INFO"
                     }
                     throw "No CIFS/SMB data LIFs found on target SVM: $TargetSVM"
                 }

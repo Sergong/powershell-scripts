@@ -91,8 +91,19 @@ try {
     # Filter for CIFS/SMB LIFs
     Write-Host "=== CIFS/SMB DATA LIFs ===" -ForegroundColor Cyan
     $CifsLIFs = $AllLIFs | Where-Object {
-        ($_.DataProtocols -contains "cifs" -or $_.DataProtocols -contains "smb") -and 
-        $_.Role -eq "data"
+        # Check for CIFS/SMB protocols (handle different ONTAP versions)
+        $HasCifsProtocol = ($_.DataProtocols -contains "cifs") -or 
+                          ($_.DataProtocols -contains "smb") -or 
+                          ($_.DataProtocols -contains "data_cifs") -or
+                          ($_.DataProtocols -join ',' -match 'cifs')
+        
+        # Check for data role (handle different ONTAP versions)
+        $HasDataRole = ($_.Role -eq "data") -or 
+                      ($_.Role -contains "data") -or 
+                      ($_.Role -contains "data_cifs") -or
+                      ($_.Role -match 'data')
+        
+        $HasCifsProtocol -and $HasDataRole
     }
     
     if ($CifsLIFs) {
@@ -105,21 +116,39 @@ try {
         Write-Host "[ERROR] No CIFS/SMB data LIFs found!" -ForegroundColor Red
         
         # Show what we did find
-        Write-Host "`n=== ANALYSIS ===" -ForegroundColor Yellow
-        $DataLIFs = $AllLIFs | Where-Object { $_.Role -eq "data" }
-        if ($DataLIFs) {
-            Write-Host "Data LIFs found (but not CIFS/SMB):" -ForegroundColor Yellow
-            foreach ($LIF in $DataLIFs) {
+        Write-Host "`n=== DETAILED ANALYSIS ===" -ForegroundColor Yellow
+        
+        # Check for any LIFs with CIFS-like protocols
+        $CifsLikeProtocols = $AllLIFs | Where-Object { 
+            ($_.DataProtocols -join ',' -match 'cifs') -or 
+            ($_.DataProtocols -contains "smb") -or 
+            ($_.DataProtocols -contains "data_cifs")
+        }
+        if ($CifsLikeProtocols) {
+            Write-Host "LIFs with CIFS-related protocols:" -ForegroundColor Yellow
+            foreach ($LIF in $CifsLikeProtocols) {
                 $ProtocolsStr = if ($LIF.DataProtocols) { $LIF.DataProtocols -join ',' } else { "none" }
-                Write-Host "  - $($LIF.InterfaceName): $ProtocolsStr" -ForegroundColor Yellow
+                $RoleStr = if ($LIF.Role) { $LIF.Role } else { "none" }
+                Write-Host "  - $($LIF.InterfaceName):" -ForegroundColor Yellow
+                Write-Host "    Protocols: $ProtocolsStr" -ForegroundColor Gray
+                Write-Host "    Role: $RoleStr" -ForegroundColor Gray
             }
         }
         
-        $CifsAnyRole = $AllLIFs | Where-Object { $_.DataProtocols -contains "cifs" -or $_.DataProtocols -contains "smb" }
-        if ($CifsAnyRole) {
-            Write-Host "CIFS/SMB LIFs found (but not data role):" -ForegroundColor Yellow
-            foreach ($LIF in $CifsAnyRole) {
-                Write-Host "  - $($LIF.InterfaceName): Role=$($LIF.Role)" -ForegroundColor Yellow
+        # Check for any LIFs with data-like roles
+        $DataLikeRoles = $AllLIFs | Where-Object { 
+            ($_.Role -match 'data') -or 
+            ($_.Role -contains "data") -or 
+            ($_.Role -contains "data_cifs")
+        }
+        if ($DataLikeRoles) {
+            Write-Host "`nLIFs with data-related roles:" -ForegroundColor Yellow
+            foreach ($LIF in $DataLikeRoles) {
+                $ProtocolsStr = if ($LIF.DataProtocols) { $LIF.DataProtocols -join ',' } else { "none" }
+                $RoleStr = if ($LIF.Role) { $LIF.Role } else { "none" }
+                Write-Host "  - $($LIF.InterfaceName):" -ForegroundColor Yellow
+                Write-Host "    Protocols: $ProtocolsStr" -ForegroundColor Gray
+                Write-Host "    Role: $RoleStr" -ForegroundColor Gray
             }
         }
     }
