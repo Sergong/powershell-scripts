@@ -166,7 +166,9 @@ function Get-CIFSSessionData {
                 $Sessions = Get-NcCifsSession -VserverContext $SVM.Name -ErrorAction SilentlyContinue
                 
                 if ($Sessions) {
-                    Write-Log "Found $(($Sessions | Measure-Object).Count) active session(s) for SVM $($SVM.Name)" "SUCCESS"
+                    $SessionCount = ($Sessions | Measure-Object).Count
+                    $SVMName = $SVM.Name
+                    Write-Log "Found $SessionCount active session(s) for SVM $SVMName" "SUCCESS"
                     
                     foreach ($Session in $Sessions) {
                         $SessionData = [PSCustomObject]@{
@@ -254,8 +256,25 @@ function Get-UniqueSessionData {
         }
         
         # Create hash of session data for comparison (exclude timestamp)
-        $SessionDataForHash = $Session | Select-Object -Property * -ExcludeProperty Timestamp
-        $SessionHash = ($SessionDataForHash | ConvertTo-Json -Compress | Get-FileHash -Algorithm MD5).Hash
+        try {
+            $SessionDataForHash = $Session | Select-Object -Property * -ExcludeProperty Timestamp
+            $JsonString = $SessionDataForHash | ConvertTo-Json -Compress -ErrorAction Stop
+            # Convert string to bytes and hash it
+            $StringBytes = [System.Text.Encoding]::UTF8.GetBytes($JsonString)
+            $MD5 = [System.Security.Cryptography.MD5]::Create()
+            $HashBytes = $MD5.ComputeHash($StringBytes)
+            $SessionHash = [BitConverter]::ToString($HashBytes) -replace '-',''
+            $MD5.Dispose()
+        } catch {
+            Write-Log "Error creating session hash for SessionId $($Session.SessionId): $_" "ERROR"
+            # Use a simple fallback hash based on key properties
+            $FallbackString = "$($Session.Cluster)|$($Session.SVM)|$($Session.SessionId)|$($Session.ClientAddress)|$($Session.OpenFiles)"
+            $StringBytes = [System.Text.Encoding]::UTF8.GetBytes($FallbackString)
+            $MD5 = [System.Security.Cryptography.MD5]::Create()
+            $HashBytes = $MD5.ComputeHash($StringBytes)
+            $SessionHash = [BitConverter]::ToString($HashBytes) -replace '-',''
+            $MD5.Dispose()
+        }
         
         # Check if this is a new session or if session data has changed
         if (-not $script:TrackedSessions.ContainsKey($SessionKey) -or 
@@ -286,9 +305,21 @@ function Get-UniqueSessionData {
             Write-Log "Session ended: SVM=$($RemovedSession.SVM), SessionID=$($RemovedSession.SessionId)" "WARNING"
             
             # Add session end record to CSV
-            $SessionEndData = $RemovedSession.PSObject.Copy()
-            $SessionEndData.Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-            $SessionEndData.SessionState = "Session Ended"
+            try {
+                $SessionEndData = $RemovedSession | Select-Object *
+                $SessionEndData.Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                $SessionEndData.SessionState = "Session Ended"
+            } catch {
+                Write-Log "Error creating session end data: $_" "WARNING"
+                # Create a minimal session end record
+                $SessionEndData = [PSCustomObject]@{
+                    Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+                    Cluster = $RemovedSession.Cluster
+                    SVM = $RemovedSession.SVM
+                    SessionId = $RemovedSession.SessionId
+                    SessionState = "Session Ended"
+                }
+            }
             $NewOrChangedSessions += $SessionEndData
             
             $SessionsToRemove += $Key
