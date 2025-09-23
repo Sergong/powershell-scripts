@@ -50,6 +50,10 @@
 .PARAMETER ExportPath
     Path to the CIFS export directory for volume validation (optional)
     If specified, will validate discovered volumes against exported share data
+    
+.PARAMETER ContinuePrompts
+    Prompt user for confirmation after each major operation (except in WhatIf mode)
+    Allows for verification of changes and early exit if issues are detected
 #>
 
 param(
@@ -90,7 +94,10 @@ param(
     [switch]$SkipSnapMirrorBreak,
     
     [Parameter(Mandatory=$false)]
-    [string]$ExportPath
+    [string]$ExportPath,
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$ContinuePrompts
 )
 
 # Import NetApp PowerShell Toolkit
@@ -136,6 +143,55 @@ function Write-Log {
     $LogEntry = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [$Level] $Message"
     Write-Host $LogEntry
     Add-Content -Path $LogFile -Value $LogEntry
+}
+
+# Function to prompt user for continuation (unless in WhatIf mode)
+function Confirm-Continue {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Operation,
+        [Parameter(Mandatory=$false)]
+        [string]$Details = ""
+    )
+    
+    if ($WhatIf) {
+        Write-Log "[WHATIF] Would prompt to continue after: $Operation"
+        return $true
+    }
+    
+    if ($ContinuePrompts) {
+        Write-Host "`n" -ForegroundColor Yellow
+        Write-Host "=== CONTINUE PROMPT ===" -ForegroundColor Yellow
+        Write-Host "Operation completed: $Operation" -ForegroundColor White
+        if ($Details) {
+            Write-Host "Details: $Details" -ForegroundColor Gray
+        }
+        Write-Host "Review the above output for any errors or unexpected results." -ForegroundColor Yellow
+        
+        $Response = ""
+        while ($Response -notin @("Y", "y", "N", "n", "Q", "q")) {
+            $Response = Read-Host "Continue with next operation? (Y/N/Q to quit)"
+        }
+        
+        switch ($Response.ToUpper()) {
+            "Y" { 
+                Write-Log "User chose to continue after: $Operation"
+                return $true 
+            }
+            "N" { 
+                Write-Log "User chose to stop after: $Operation"
+                Write-Host "Operation stopped by user choice." -ForegroundColor Yellow
+                exit 0
+            }
+            "Q" { 
+                Write-Log "User chose to quit after: $Operation"
+                Write-Host "Operation aborted by user." -ForegroundColor Red
+                exit 1
+            }
+        }
+    }
+    
+    return $true
 }
 
 # ZAPI function to set advanced CIFS share properties not supported by REST API
@@ -249,6 +305,12 @@ if ($SourceLIFNames -and $TargetLIFNames) {
     Write-Log "LIF Migration: Will auto-discover CIFS LIFs"
 }
 
+if ($ContinuePrompts) {
+    Write-Log "Continue Prompts: Enabled (will pause after each major operation)"
+} else {
+    Write-Log "Continue Prompts: Disabled (running in unattended mode)"
+}
+
 if ($SnapMirrorVolumes -and $SnapMirrorVolumes.Count -gt 0) {
     Write-Log "SnapMirror Volumes (specified): $($SnapMirrorVolumes -join ', ')"
 } elseif (!$SkipSnapMirrorBreak) {
@@ -290,6 +352,9 @@ try {
         throw "Failed to connect to target cluster"
     }
     Write-Log "[OK] Connected to target cluster successfully"
+    
+    # Continue prompt after cluster connections
+    Confirm-Continue "Cluster Connections" "Connected to both source and target clusters successfully"
 
     # Step 3: Auto-discover CIFS LIFs (if not specified)
     if ((!$SourceLIFNames -or $SourceLIFNames.Count -eq 0) -or (!$TargetLIFNames -or $TargetLIFNames.Count -eq 0)) {
@@ -411,6 +476,9 @@ try {
     for ($i = 0; $i -lt $SourceLIFNames.Count; $i++) {
         Write-Log "  $($SourceLIFNames[$i]) -> $($TargetLIFNames[$i])"
     }
+    
+    # Continue prompt after LIF discovery and validation
+    Confirm-Continue "LIF Discovery and Validation" "Discovered and validated $($SourceLIFNames.Count) CIFS LIF pairs for migration"
 
     # Step 5: Auto-discover SnapMirror volumes (if not specified)
     if ((!$SnapMirrorVolumes -or $SnapMirrorVolumes.Count -eq 0) -and !$SkipSnapMirrorBreak) {
@@ -530,6 +598,10 @@ try {
         Write-Log "  - Volume mounting and share creation will still proceed" "INFO"
         Write-Log "  - Use Debug-SnapMirrorDiscovery.ps1 to troubleshoot SnapMirror relationships" "INFO"
     }
+    
+    # Continue prompt after SnapMirror discovery
+    $VolCount = if ($SnapMirrorVolumes) { $SnapMirrorVolumes.Count } else { 0 }
+    Confirm-Continue "SnapMirror Discovery" "Discovered $VolCount SnapMirror volumes for processing"
 
     # Step 8: Collect source LIF information
     Write-Log "Collecting source LIF information..."
@@ -658,7 +730,7 @@ try {
                     Write-Log "[WHATIF] Would stop CIFS server on source SVM"
                 }
             } else {
-                Write-Log "CIFS server is already stopped on source SVM"
+                Write-Log "[OK] CIFS server is already stopped on source SVM (idempotent)"
             }
         } else {
             Write-Log "[NOK] No CIFS server found on source SVM" "WARNING"
@@ -667,6 +739,9 @@ try {
         Write-Log "[NOK] Failed to stop CIFS server: $($_.Exception.Message)" "ERROR"
         throw
     }
+    
+    # Continue prompt after CIFS server disable
+    Confirm-Continue "Source CIFS Server Disable" "Source CIFS server has been stopped/disabled"
 
     # Step 13: Final SnapMirror update (after CIFS is offline)
     if ($SnapMirrorVolumes -and $SnapMirrorVolumes.Count -gt 0 -and !$SkipSnapMirrorBreak) {
@@ -795,6 +870,11 @@ try {
         Write-Log "No SnapMirror volumes specified - continuing without SnapMirror operations"
     }
     
+    # Continue prompt after SnapMirror operations
+    if ($SnapMirrorVolumes -and $SnapMirrorVolumes.Count -gt 0 -and !$SkipSnapMirrorBreak) {
+        Confirm-Continue "SnapMirror Operations" "Completed SnapMirror update/quiesce/break operations for $($SnapMirrorVolumes.Count) volumes"
+    }
+    
     # Step 15: Mount volumes and create exported CIFS shares and ACLs (after SnapMirror break)
     if ($ExportPath -and (Test-Path $ExportPath)) {
         Write-Log "Processing exported CIFS shares and volume mounting..."
@@ -875,10 +955,10 @@ try {
                     
                     if (!$WhatIf) {
                         try {
-                            # Check if share already exists
+                            # Check if share already exists (idempotency)
                             $ExistingShare = Get-NcCifsShare -Controller $TargetController -VserverContext $TargetSVM -Name $ShareName -ErrorAction SilentlyContinue
                             if ($ExistingShare) {
-                                Write-Log "[WARNING] Share '$ShareName' already exists, skipping..." "WARNING"
+                                Write-Log "[OK] Share '$ShareName' already exists (idempotent)" "INFO"
                                 continue
                             }
 
@@ -956,9 +1036,17 @@ try {
                     
                     if (!$WhatIf) {
                         try {
-                            Add-NcCifsShareAcl -Controller $TargetController -VserverContext $TargetSVM -Share $ShareName -UserOrGroup $ACL.UserOrGroup -Permission $ACL.Permission -UserGroupType $ACL.UserGroupType
-                            Write-Log "[OK] Successfully added exported ACL for share: $ShareName"
-                            $ACLsCreated++
+                            # Check if ACL already exists (idempotency)
+                            $ExistingACLs = Get-NcCifsShareAcl -Controller $TargetController -VserverContext $TargetSVM -Share $ShareName -ErrorAction SilentlyContinue
+                            $ACLExists = $ExistingACLs | Where-Object { $_.UserOrGroup -eq $ACL.UserOrGroup -and $_.Permission -eq $ACL.Permission }
+                            
+                            if ($ACLExists) {
+                                Write-Log "[OK] ACL for '$($ACL.UserOrGroup)' already exists on share '$ShareName' (idempotent)" "INFO"
+                            } else {
+                                Add-NcCifsShareAcl -Controller $TargetController -VserverContext $TargetSVM -Share $ShareName -UserOrGroup $ACL.UserOrGroup -Permission $ACL.Permission -UserGroupType $ACL.UserGroupType
+                                Write-Log "[OK] Successfully added exported ACL for share: $ShareName"
+                                $ACLsCreated++
+                            }
                         } catch {
                             Write-Log "[NOK] Failed to add exported ACL for share $ShareName`: $($_.Exception.Message)" "ERROR"
                         }
@@ -981,6 +1069,11 @@ try {
     } else {
         Write-Log "[INFO] No export path specified - skipping CIFS share processing"
     }
+    
+    # Continue prompt after share and ACL creation
+    if ($ExportPath -and (Test-Path $ExportPath)) {
+        Confirm-Continue "CIFS Share and ACL Creation" "Completed volume mounting and CIFS share/ACL creation from exported configuration"
+    }
 
     # Step 16: Take source LIFs administratively down
     Write-Log "Taking source LIFs administratively down..."
@@ -1000,7 +1093,7 @@ try {
                 Write-Log "[WHATIF] Would set source LIF '$($SourceLIF.Name)' administratively down"
             }
         } else {
-            Write-Log "Source LIF '$($SourceLIF.Name)' is already administratively down"
+            Write-Log "[OK] Source LIF '$($SourceLIF.Name)' is already administratively down (idempotent)"
         }
     }
 
@@ -1023,9 +1116,15 @@ try {
                 # Wait a moment for the change to take effect
                 Start-Sleep -Seconds 3
                 
-                # Update the IP address and netmask
-                Write-Log "Updating IP address and netmask for target LIF '$($TargetLIF.Name)'..."
-                Set-NcNetInterface -Controller $TargetController -VserverContext $TargetSVM -Name $TargetLIF.Name -Address $SourceLIF.IPAddress -Netmask $SourceLIF.Netmask
+                # Check if target LIF already has the source IP (idempotency)
+                $CurrentTargetLIF = Get-NcNetInterface -Controller $TargetController -VserverContext $TargetSVM -Name $TargetLIF.Name
+                if ($CurrentTargetLIF.Address -eq $SourceLIF.IPAddress) {
+                    Write-Log "[OK] Target LIF '$($TargetLIF.Name)' already has IP $($SourceLIF.IPAddress) (idempotent)"
+                } else {
+                    # Update the IP address and netmask
+                    Write-Log "Updating IP address and netmask for target LIF '$($TargetLIF.Name)'..."
+                    Set-NcNetInterface -Controller $TargetController -VserverContext $TargetSVM -Name $TargetLIF.Name -Address $SourceLIF.IPAddress -Netmask $SourceLIF.Netmask
+                }
                 
                 # Wait a moment for the IP change to take effect
                 Start-Sleep -Seconds 3
@@ -1056,6 +1155,9 @@ try {
             Write-Log "[WHATIF] Would update target LIF '$($TargetLIF.Name)' with IP: $($SourceLIF.IPAddress), Netmask: $($SourceLIF.Netmask)"
         }
     }
+    
+    # Continue prompt after LIF migration
+    Confirm-Continue "LIF IP Migration" "Completed IP address migration from source LIFs to target LIFs"
 
     # Step 18: Verify target SVM CIFS server is running
     Write-Log "Verifying target SVM CIFS server status..."
@@ -1075,8 +1177,23 @@ try {
     } catch {
         Write-Log "[NOK] Could not check target CIFS server status: $($_.Exception.Message)" "WARNING"
     }
+    
+    # Final continue prompt for verification
+    Confirm-Continue "Migration Verification" "All operations completed - please verify target CIFS server and shares are accessible"
 
     Write-Log "=== CIFS SVM Takeover Completed Successfully ==="
+    Write-Log "Summary of operations performed:"
+    Write-Log "  - Source cluster connection: $SourceCluster"
+    Write-Log "  - Target cluster connection: $TargetCluster"
+    Write-Log "  - Source SVM: $SourceSVM (CIFS server disabled)"
+    Write-Log "  - Target SVM: $TargetSVM (receiving migrated configuration)"
+    Write-Log "  - LIFs migrated: $($SourceLIFInfo.Count)"
+    if ($SnapMirrorVolumes) { Write-Log "  - SnapMirror volumes processed: $($SnapMirrorVolumes.Count)" }
+    Write-Log "\nNext steps:"
+    Write-Log "  1. Verify target CIFS server is running and accessible"
+    Write-Log "  2. Test client connectivity to migrated shares"
+    Write-Log "  3. Update DNS records if necessary"
+    Write-Log "  4. Monitor target SVM performance and capacity"
     
 } catch {
     Write-Log "CIFS SVM Takeover failed with error: $($_.Exception.Message)" "ERROR"
