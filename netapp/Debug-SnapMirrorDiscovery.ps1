@@ -115,7 +115,7 @@ try {
     $Counter = 0
     foreach ($SM in $AllSnapMirrors) {
         $Counter++
-        Write-Host "SnapMirror Relationship #$Counter:" -ForegroundColor White
+        Write-Host "SnapMirror Relationship #$($Counter):" -ForegroundColor White
         
         # Try to find source and destination properties by checking common property patterns
         $SourceProp = $null
