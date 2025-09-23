@@ -189,7 +189,7 @@ try {
         Write-Host "=== SNAPMIRROR RELATIONSHIPS FOR SVM: $SVM ===" -ForegroundColor Cyan
         
         # All relationships for the SVM
-        $SVMSnapMirrors = $AllSnapMirrors | Where-Object { $_.Destination -like "$($SVM):*" }
+        $SVMSnapMirrors = $AllSnapMirrors | Where-Object { $_.DestinationLocation -like "$($SVM):*" }
         
         if ($SVMSnapMirrors) {
             Write-Host "[OK] Found $($SVMSnapMirrors.Count) SnapMirror relationships for SVM: $SVM" -ForegroundColor Green
@@ -201,19 +201,19 @@ try {
             Write-Host "`n--- ACTIVE RELATIONSHIPS (NOT BROKEN) ---" -ForegroundColor Green
             if ($ActiveSVMSnapMirrors) {
                 Write-Host "Found $($ActiveSVMSnapMirrors.Count) active SnapMirror relationships:" -ForegroundColor Green
-                foreach ($SM in $ActiveSVMSnapMirrors | Sort-Object Destination) {
-                    $VolumeName = ($SM.Destination -split ':')[1]
+                foreach ($SM in $ActiveSVMSnapMirrors | Sort-Object DestinationLocation) {
+                    $VolumeName = ($SM.DestinationLocation -split ':')[1]
                     $StatusColor = switch ($SM.Status) {
                         "Idle" { "Green" }
                         "Transferring" { "Yellow" }  
                         "Quiesced" { "Yellow" }
                         default { "White" }
                     }
-                    Write-Host "  - Volume: $VolumeName (Status: $($SM.Status), Source: $($SM.Source))" -ForegroundColor $StatusColor
+                    Write-Host "  - Volume: $VolumeName (Status: $($SM.Status), Source: $($SM.SourceLocation))" -ForegroundColor $StatusColor
                 }
                 
                 # These are the volumes that would be discovered by the migration script
-                $DiscoverableVolumes = $ActiveSVMSnapMirrors | ForEach-Object { ($_.Destination -split ':')[1] }
+                $DiscoverableVolumes = $ActiveSVMSnapMirrors | ForEach-Object { ($_.DestinationLocation -split ':')[1] }
                 Write-Host "`n✅ VOLUMES DISCOVERABLE BY MIGRATION SCRIPT:" -ForegroundColor Green
                 Write-Host "   $($DiscoverableVolumes -join ', ')" -ForegroundColor Green
                 
@@ -224,9 +224,9 @@ try {
             Write-Host "`n--- BROKEN RELATIONSHIPS ---" -ForegroundColor Red
             if ($BrokenSVMSnapMirrors) {
                 Write-Host "Found $($BrokenSVMSnapMirrors.Count) broken SnapMirror relationships:" -ForegroundColor Yellow
-                foreach ($SM in $BrokenSVMSnapMirrors | Sort-Object Destination) {
-                    $VolumeName = ($SM.Destination -split ':')[1]
-                    Write-Host "  - Volume: $VolumeName (Status: $($SM.Status), Source: $($SM.Source))" -ForegroundColor Red
+                foreach ($SM in $BrokenSVMSnapMirrors | Sort-Object DestinationLocation) {
+                    $VolumeName = ($SM.DestinationLocation -split ':')[1]
+                    Write-Host "  - Volume: $VolumeName (Status: $($SM.Status), Source: $($SM.SourceLocation))" -ForegroundColor Red
                 }
             } else {
                 Write-Host "No broken SnapMirror relationships found for SVM: $SVM" -ForegroundColor Green
@@ -237,10 +237,10 @@ try {
             
             # Show available destination SVMs
             Write-Host "`n=== AVAILABLE DESTINATION SVMs ===" -ForegroundColor Yellow
-            $DestinationSVMs = $AllSnapMirrors | ForEach-Object { ($_.Destination -split ':')[0] } | Sort-Object | Get-Unique
+            $DestinationSVMs = $AllSnapMirrors | ForEach-Object { ($_.DestinationLocation -split ':')[0] } | Sort-Object | Get-Unique
             Write-Host "Available destination SVMs in SnapMirror relationships:" -ForegroundColor Yellow
             foreach ($DestSVM in $DestinationSVMs) {
-                $Count = ($AllSnapMirrors | Where-Object { $_.Destination -like "$($DestSVM):*" }).Count
+                $Count = ($AllSnapMirrors | Where-Object { $_.DestinationLocation -like "$($DestSVM):*" }).Count
                 Write-Host "  - $DestSVM ($Count relationships)" -ForegroundColor Yellow
             }
         }
@@ -249,7 +249,7 @@ try {
     # Show recommendations
     Write-Host "`n=== RECOMMENDATIONS ===" -ForegroundColor Cyan
     if ($SVM) {
-        $ActiveForSVM = $AllSnapMirrors | Where-Object { $_.Destination -like "$($SVM):*" -and $_.Status -ne "Broken-off" }
+        $ActiveForSVM = $AllSnapMirrors | Where-Object { $_.DestinationLocation -like "$($SVM):*" -and $_.Status -ne "Broken-off" }
         if ($ActiveForSVM) {
             Write-Host "✅ SVM '$SVM' has $($ActiveForSVM.Count) active SnapMirror relationships" -ForegroundColor Green
             Write-Host "   The migration script should discover these automatically" -ForegroundColor Green

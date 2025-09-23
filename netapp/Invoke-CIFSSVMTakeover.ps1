@@ -424,12 +424,12 @@ try {
             
             # Debug: Show all SnapMirror relationships for troubleshooting
             foreach ($SM in $AllSnapMirrors) {
-                Write-Log "[DEBUG] SnapMirror: $($SM.Source) -> $($SM.Destination) (Status: $($SM.Status), State: $($SM.RelationshipStatus))"
+                Write-Log "[DEBUG] SnapMirror: $($SM.SourceLocation) -> $($SM.DestinationLocation) (Status: $($SM.Status), State: $($SM.RelationshipStatus))"
             }
             
             # Filter for target SVM relationships that are not broken-off
             $TargetSnapMirrors = $AllSnapMirrors | Where-Object {
-                $_.Destination -like "${TargetSVM}:*" -and $_.Status -ne "Broken-off"
+                $_.DestinationLocation -like "$($TargetSVM):*" -and $_.Status -ne "Broken-off"
             }
             
             Write-Log "[DEBUG] Found $($TargetSnapMirrors.Count) SnapMirror relationships for target SVM (non-broken)"
@@ -437,10 +437,10 @@ try {
             if ($TargetSnapMirrors) {
                 foreach ($SM in $TargetSnapMirrors) {
                     # Extract volume name from destination path (format: svm:volume)
-                    $VolumeName = ($SM.Destination -split ':')[1]
+                    $VolumeName = ($SM.DestinationLocation -split ':')[1]
                     if ($VolumeName -and $DiscoveredSnapMirrorVolumes -notcontains $VolumeName) {
                         $DiscoveredSnapMirrorVolumes += $VolumeName
-                        Write-Log "[OK] Found SnapMirror volume: $VolumeName (Status: $($SM.Status), Source: $($SM.Source))"
+                        Write-Log "[OK] Found SnapMirror volume: $VolumeName (Status: $($SM.Status), Source: $($SM.SourceLocation))"
                     }
                 }
                 
@@ -455,13 +455,13 @@ try {
                 
                 # Show any broken-off relationships for reference
                 $BrokenSnapMirrors = $AllSnapMirrors | Where-Object {
-                    $_.Destination -like "${TargetSVM}:*" -and $_.Status -eq "Broken-off"
+                    $_.DestinationLocation -like "$($TargetSVM):*" -and $_.Status -eq "Broken-off"
                 }
                 
                 if ($BrokenSnapMirrors) {
                     Write-Log "[INFO] Found $($BrokenSnapMirrors.Count) already broken SnapMirror relationships:" "INFO"
                     foreach ($SM in $BrokenSnapMirrors) {
-                        $VolumeName = ($SM.Destination -split ':')[1]
+                        $VolumeName = ($SM.DestinationLocation -split ':')[1]
                         Write-Log "  - Volume: $VolumeName (Status: $($SM.Status))" "INFO"
                     }
                 }
@@ -673,7 +673,7 @@ try {
         Write-Log "Performing final SnapMirror updates (source CIFS is now offline)..."
         
         foreach ($VolumeName in $SnapMirrorVolumes) {
-            $DestinationPath = "${TargetSVM}:$VolumeName"
+            $DestinationPath = "$($TargetSVM):$VolumeName"
             Write-Log "Updating SnapMirror for volume: $VolumeName"
             
             if (!$WhatIf) {
@@ -724,7 +724,7 @@ try {
         Write-Log "Breaking SnapMirror relationships after final update..."
         
         foreach ($VolumeName in $SnapMirrorVolumes) {
-            $DestinationPath = "${TargetSVM}:$VolumeName"
+            $DestinationPath = "$($TargetSVM):$VolumeName"
             Write-Log "Processing SnapMirror break for volume: $VolumeName"
             
             if (!$WhatIf) {
@@ -733,7 +733,7 @@ try {
                     $SMRelation = Get-NcSnapmirror -Controller $TargetController -Destination $DestinationPath -ErrorAction SilentlyContinue
                     
                     if ($SMRelation) {
-                        Write-Log "Found SnapMirror: $($SMRelation.Source) -> $($SMRelation.Destination)"
+                        Write-Log "Found SnapMirror: $($SMRelation.SourceLocation) -> $($SMRelation.DestinationLocation)"
                         Write-Log "Current Status: $($SMRelation.Status)"
                         
                         if ($SMRelation.Status -ne "Broken-off") {
