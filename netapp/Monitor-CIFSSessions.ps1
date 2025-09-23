@@ -24,6 +24,10 @@
 .PARAMETER MaxIterations
     Maximum number of monitoring iterations. Set to 0 for infinite loop. Default is 0.
 
+.PARAMETER TrackUniqueSessions
+    When enabled, only saves new or changed sessions to CSV, preventing duplicates.
+    Default is $true to avoid CSV bloat.
+
 .PARAMETER WhatIf
     Shows what would be done without actually connecting to the cluster or creating files.
 
@@ -32,6 +36,9 @@
 
 .EXAMPLE
     .\Monitor-CIFSSessions.ps1 -Cluster "10.1.1.100" -OutputPath "C:\Monitoring" -MaxIterations 20
+
+.EXAMPLE
+    .\Monitor-CIFSSessions.ps1 -Cluster "cluster01.domain.com" -TrackUniqueSessions $false
 
 .NOTES
     Author: PowerShell Scripts Repository
@@ -59,6 +66,9 @@ param(
     [Parameter(Mandatory = $false)]
     [int]${MaxIterations} = 0,
     
+    [Parameter(Mandatory = $false)]
+    [bool]${TrackUniqueSessions} = $true,
+    
     [switch]${WhatIf}
 )
 
@@ -67,6 +77,7 @@ ${script:LogFile} = ""
 ${script:CurrentCsvFile} = ""
 ${script:IterationCount} = 0
 ${script:StartTime} = Get-Date
+${script:TrackedSessions} = @{}  # Hash table to track unique sessions
 
 # Function to write log messages
 function Write-Log {
@@ -122,6 +133,7 @@ function Initialize-OutputFiles {
             Write-Log "Output Path: ${OutputPath}" "INFO"
             Write-Log "Interval: ${IntervalSeconds} seconds" "INFO"
             Write-Log "Max Iterations: $(if (${MaxIterations} -eq 0) { 'Infinite' } else { ${MaxIterations} })" "INFO"
+            Write-Log "Track Unique Sessions: ${TrackUniqueSessions}" "INFO"
         }
         
         return $true
@@ -220,6 +232,84 @@ function Get-CIFSSessionData {
     }
 }
 
+# Function to filter unique sessions
+function Get-UniqueSessionData {
+    param(
+        [array]${SessionData}
+    )
+    
+    if (-not ${TrackUniqueSessions}) {
+        Write-Log "Session uniqueness tracking disabled - returning all sessions" "INFO"
+        return ${SessionData}
+    }
+    
+    ${NewOrChangedSessions} = @()
+    ${CurrentIterationKeys} = @()
+    
+    foreach (${Session} in ${SessionData}) {
+        # Create unique key for session (combination of cluster, SVM, and session ID)
+        ${SessionKey} = "${Session}.Cluster|${Session}.SVM|${Session}.SessionId"
+        ${CurrentIterationKeys} += ${SessionKey}
+        
+        # Skip "No active sessions" entries from uniqueness tracking
+        if (${Session}.SessionId -eq "No active sessions") {
+            # Always include "no sessions" entries but don't track them
+            ${NewOrChangedSessions} += ${Session}
+            continue
+        }
+        
+        # Create hash of session data for comparison (exclude timestamp)
+        ${SessionDataForHash} = ${Session} | Select-Object -Property * -ExcludeProperty Timestamp
+        ${SessionHash} = (${SessionDataForHash} | ConvertTo-Json -Compress | Get-FileHash -Algorithm MD5).Hash
+        
+        # Check if this is a new session or if session data has changed
+        if (-not ${script:TrackedSessions}.ContainsKey(${SessionKey}) -or 
+            ${script:TrackedSessions}[${SessionKey}].Hash -ne ${SessionHash}) {
+            
+            # Update tracked sessions
+            ${script:TrackedSessions}[${SessionKey}] = @{
+                Hash = ${SessionHash}
+                LastSeen = Get-Date
+                Data = ${Session}
+            }
+            
+            ${NewOrChangedSessions} += ${Session}
+            
+            if (${script:TrackedSessions}.ContainsKey(${SessionKey})) {
+                Write-Log "Session changed: SVM=${Session}.SVM, SessionID=${Session}.SessionId" "INFO"
+            } else {
+                Write-Log "New session detected: SVM=${Session}.SVM, SessionID=${Session}.SessionId" "SUCCESS"
+            }
+        }
+    }
+    
+    # Clean up sessions that are no longer active (not seen in current iteration)
+    ${SessionsToRemove} = @()
+    foreach (${Key} in ${script:TrackedSessions}.Keys) {
+        if (${CurrentIterationKeys} -notcontains ${Key}) {
+            ${RemovedSession} = ${script:TrackedSessions}[${Key}].Data
+            Write-Log "Session ended: SVM=${RemovedSession}.SVM, SessionID=${RemovedSession}.SessionId" "WARNING"
+            
+            # Add session end record to CSV
+            ${SessionEndData} = ${RemovedSession}.PSObject.Copy()
+            ${SessionEndData}.Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+            ${SessionEndData}.SessionState = "Session Ended"
+            ${NewOrChangedSessions} += ${SessionEndData}
+            
+            ${SessionsToRemove} += ${Key}
+        }
+    }
+    
+    # Remove ended sessions from tracking
+    foreach (${Key} in ${SessionsToRemove}) {
+        ${script:TrackedSessions}.Remove(${Key})
+    }
+    
+    Write-Log "Unique/Changed Sessions: $((${NewOrChangedSessions} | Measure-Object).Count) out of $((${SessionData} | Measure-Object).Count) total" "INFO"
+    
+    return ${NewOrChangedSessions}
+}
+
 # Function to save session data to CSV
 function Save-SessionDataToCsv {
     param(
@@ -228,19 +318,26 @@ function Save-SessionDataToCsv {
     
     try {
         if (${SessionData} -and (${SessionData}.Count -gt 0)) {
-            if (${WhatIf}) {
-                Write-Log "Would save $((${SessionData} | Measure-Object).Count) session records to ${script:CurrentCsvFile}" "INFO"
-                ${SessionData} | Format-Table -AutoSize | Out-String | Write-Host
+            # Filter for unique sessions if tracking is enabled
+            ${UniqueSessionData} = Get-UniqueSessionData -SessionData ${SessionData}
+            
+            if (${UniqueSessionData} -and (${UniqueSessionData}.Count -gt 0)) {
+                if (${WhatIf}) {
+                    Write-Log "Would save $((${UniqueSessionData} | Measure-Object).Count) unique session records to ${script:CurrentCsvFile}" "INFO"
+                    ${UniqueSessionData} | Format-Table -AutoSize | Out-String | Write-Host
+                } else {
+                    # Check if file exists to determine if we need headers
+                    ${AddHeaders} = -not (Test-Path ${script:CurrentCsvFile})
+                    
+                    ${UniqueSessionData} | Export-Csv -Path ${script:CurrentCsvFile} -NoTypeInformation -Append:(-not ${AddHeaders})
+                    
+                    Write-Log "Saved $((${UniqueSessionData} | Measure-Object).Count) unique session records to CSV file" "SUCCESS"
+                }
             } else {
-                # Check if file exists to determine if we need headers
-                ${AddHeaders} = -not (Test-Path ${script:CurrentCsvFile})
-                
-                ${SessionData} | Export-Csv -Path ${script:CurrentCsvFile} -NoTypeInformation -Append:(-not ${AddHeaders})
-                
-                Write-Log "Saved $((${SessionData} | Measure-Object).Count) session records to CSV file" "SUCCESS"
+                Write-Log "No new or changed session data to save" "INFO"
             }
         } else {
-            Write-Log "No session data to save" "INFO"
+            Write-Log "No session data to process" "INFO"
         }
     }
     catch {
@@ -252,6 +349,7 @@ function Save-SessionDataToCsv {
 function Stop-Monitoring {
     Write-Log "Stopping CIFS session monitoring..." "INFO"
     Write-Log "Total iterations completed: ${script:IterationCount}" "INFO"
+    Write-Log "Total unique sessions tracked: $((${script:TrackedSessions}.Keys | Measure-Object).Count)" "INFO"
     ${EndTime} = Get-Date
     ${Duration} = ${EndTime} - ${script:StartTime}
     Write-Log "Total monitoring duration: $((${Duration}.ToString('dd\.hh\:mm\:ss')))" "INFO"
