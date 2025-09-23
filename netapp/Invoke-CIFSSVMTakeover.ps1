@@ -418,27 +418,57 @@ try {
         
         try {
             # Get all SnapMirror relationships where target SVM matches
-            $AllSnapMirrors = Get-NcSnapmirror -Controller $TargetController | Where-Object {
+            Write-Log "[DEBUG] Querying SnapMirror relationships for target SVM: $TargetSVM"
+            $AllSnapMirrors = Get-NcSnapmirror -Controller $TargetController
+            Write-Log "[DEBUG] Found $($AllSnapMirrors.Count) total SnapMirror relationships"
+            
+            # Debug: Show all SnapMirror relationships for troubleshooting
+            foreach ($SM in $AllSnapMirrors) {
+                Write-Log "[DEBUG] SnapMirror: $($SM.Source) -> $($SM.Destination) (Status: $($SM.Status), State: $($SM.RelationshipStatus))"
+            }
+            
+            # Filter for target SVM relationships that are not broken-off
+            $TargetSnapMirrors = $AllSnapMirrors | Where-Object {
                 $_.Destination -like "${TargetSVM}:*" -and $_.Status -ne "Broken-off"
             }
             
-            if ($AllSnapMirrors) {
-                foreach ($SM in $AllSnapMirrors) {
+            Write-Log "[DEBUG] Found $($TargetSnapMirrors.Count) SnapMirror relationships for target SVM (non-broken)"
+            
+            if ($TargetSnapMirrors) {
+                foreach ($SM in $TargetSnapMirrors) {
                     # Extract volume name from destination path (format: svm:volume)
                     $VolumeName = ($SM.Destination -split ':')[1]
                     if ($VolumeName -and $DiscoveredSnapMirrorVolumes -notcontains $VolumeName) {
                         $DiscoveredSnapMirrorVolumes += $VolumeName
-                        Write-Log "[OK] Found SnapMirror volume: $VolumeName (Status: $($SM.Status))"
+                        Write-Log "[OK] Found SnapMirror volume: $VolumeName (Status: $($SM.Status), Source: $($SM.Source))"
                     }
                 }
                 
                 Write-Log "[OK] Auto-discovered $($DiscoveredSnapMirrorVolumes.Count) SnapMirror volumes"
                 $SnapMirrorVolumes = $DiscoveredSnapMirrorVolumes
             } else {
-                Write-Log "[NOK] No active SnapMirror relationships found on target SVM" "WARNING"
+                Write-Log "[WARNING] No active SnapMirror relationships found for target SVM: $TargetSVM" "WARNING"
+                Write-Log "[INFO] This could mean:" "INFO"
+                Write-Log "  1. No SnapMirror relationships exist for this SVM" "INFO"
+                Write-Log "  2. All relationships are already broken-off" "INFO"
+                Write-Log "  3. SVM name doesn't match exactly" "INFO"
+                
+                # Show any broken-off relationships for reference
+                $BrokenSnapMirrors = $AllSnapMirrors | Where-Object {
+                    $_.Destination -like "${TargetSVM}:*" -and $_.Status -eq "Broken-off"
+                }
+                
+                if ($BrokenSnapMirrors) {
+                    Write-Log "[INFO] Found $($BrokenSnapMirrors.Count) already broken SnapMirror relationships:" "INFO"
+                    foreach ($SM in $BrokenSnapMirrors) {
+                        $VolumeName = ($SM.Destination -split ':')[1]
+                        Write-Log "  - Volume: $VolumeName (Status: $($SM.Status))" "INFO"
+                    }
+                }
             }
         } catch {
             Write-Log "[NOK] Failed to discover SnapMirror volumes: $($_.Exception.Message)" "ERROR"
+            Write-Log "[DEBUG] Stack trace: $($_.ScriptStackTrace)" "ERROR"
         }
     }
     
@@ -494,7 +524,11 @@ try {
     if ($SnapMirrorVolumes -and $SnapMirrorVolumes.Count -gt 0) {
         Write-Log "Final SnapMirror volumes to process: $($SnapMirrorVolumes -join ', ')"
     } elseif (!$SkipSnapMirrorBreak) {
-        Write-Log "[NOK] No SnapMirror volumes identified - continuing without SnapMirror operations" "WARNING"
+        Write-Log "[WARNING] No SnapMirror volumes identified for processing" "WARNING"
+        Write-Log "[INFO] This means:" "INFO"
+        Write-Log "  - Script will skip SnapMirror update/quiesce/break operations" "INFO"
+        Write-Log "  - Volume mounting and share creation will still proceed" "INFO"
+        Write-Log "  - Use Debug-SnapMirrorDiscovery.ps1 to troubleshoot SnapMirror relationships" "INFO"
     }
 
     # Step 8: Collect source LIF information
