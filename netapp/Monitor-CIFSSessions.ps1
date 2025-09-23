@@ -28,9 +28,6 @@
     When enabled, only saves new or changed sessions to CSV, preventing duplicates.
     Default is $true to avoid CSV bloat.
 
-.PARAMETER WhatIf
-    Shows what would be done without actually connecting to the cluster or creating files.
-
 .EXAMPLE
     .\Monitor-CIFSSessions.ps1 -Cluster "cluster01.domain.com" -IntervalSeconds 180
 
@@ -67,9 +64,7 @@ param(
     [int]${MaxIterations} = 0,
     
     [Parameter(Mandatory = $false)]
-    [bool]${TrackUniqueSessions} = $true,
-    
-    [switch]${WhatIf}
+    [bool]${TrackUniqueSessions} = $true
 )
 
 # Global variables
@@ -98,7 +93,7 @@ function Write-Log {
     }
     
     # Write to log file if not in WhatIf mode
-    if (-not ${WhatIf} -and ${script:LogFile}) {
+    if (-not $WhatIfPreference -and ${script:LogFile}) {
         Add-Content -Path ${script:LogFile} -Value ${LogEntry}
     }
 }
@@ -108,7 +103,7 @@ function Initialize-OutputFiles {
     try {
         # Create output directory if it doesn't exist
         if (-not (Test-Path ${OutputPath})) {
-            if (${WhatIf}) {
+            if ($WhatIfPreference) {
                 Write-Log "Would create directory: ${OutputPath}" "INFO"
             } else {
                 New-Item -Path ${OutputPath} -ItemType Directory -Force | Out-Null
@@ -123,7 +118,7 @@ function Initialize-OutputFiles {
         ${script:LogFile} = Join-Path ${OutputPath} "Monitor_CIFSSessions_${ClusterName}_${Timestamp}.log"
         ${script:CurrentCsvFile} = Join-Path ${OutputPath} "CIFS_Sessions_${ClusterName}_${Timestamp}.csv"
         
-        if (${WhatIf}) {
+        if ($WhatIfPreference) {
             Write-Log "Would create log file: ${script:LogFile}" "INFO"
             Write-Log "Would create CSV file: ${script:CurrentCsvFile}" "INFO"
         } else {
@@ -322,7 +317,7 @@ function Save-SessionDataToCsv {
             ${UniqueSessionData} = Get-UniqueSessionData -SessionData ${SessionData}
             
             if (${UniqueSessionData} -and (${UniqueSessionData}.Count -gt 0)) {
-                if (${WhatIf}) {
+                if ($WhatIfPreference) {
                     Write-Log "Would save $((${UniqueSessionData} | Measure-Object).Count) unique session records to ${script:CurrentCsvFile}" "INFO"
                     ${UniqueSessionData} | Format-Table -AutoSize | Out-String | Write-Host
                 } else {
@@ -386,7 +381,7 @@ try {
     }
     
     # Connect to NetApp cluster
-    if (${WhatIf}) {
+    if ($WhatIfPreference) {
         Write-Log "Would connect to NetApp cluster: ${Cluster}" "INFO"
     } else {
         Write-Log "Connecting to NetApp cluster: ${Cluster}" "INFO"
@@ -413,7 +408,7 @@ try {
             Write-Log "Starting iteration ${script:IterationCount}" "INFO"
             
             # Collect CIFS session data
-            ${SessionData} = if (${WhatIf}) { 
+            ${SessionData} = if ($WhatIfPreference) {
                 @([PSCustomObject]@{
                     Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
                     Cluster = ${Cluster}
