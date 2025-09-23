@@ -321,25 +321,21 @@ function Get-UniqueSessionData {
             continue
         }
         
-        # Create hash of session data for comparison (exclude timestamp)
+        # Create hash based only on core session identity (SVM, ClientAddress, SessionID)
         try {
-            $SessionDataForHash = $Session | Select-Object -Property * -ExcludeProperty Timestamp
-            $JsonString = $SessionDataForHash | ConvertTo-Json -Compress -ErrorAction Stop
-            # Convert string to bytes and hash it
-            $StringBytes = [System.Text.Encoding]::UTF8.GetBytes($JsonString)
+            # Hash only the core identifying properties of the session
+            $SessionIdentity = "$($Session.SVM)|$($Session.ClientAddress)|$($Session.SessionId)"
+            $StringBytes = [System.Text.Encoding]::UTF8.GetBytes($SessionIdentity)
             $MD5 = [System.Security.Cryptography.MD5]::Create()
             $HashBytes = $MD5.ComputeHash($StringBytes)
             $SessionHash = [BitConverter]::ToString($HashBytes) -replace '-',''
             $MD5.Dispose()
         } catch {
             Write-Log "Error creating session hash for SessionId $($Session.SessionId): $($_.Exception.Message)" "ERROR"
-            # Use a simple fallback hash based on key properties
-            $FallbackString = "$($Session.Cluster)|$($Session.SVM)|$($Session.SessionId)|$($Session.ClientAddress)|$($Session.OpenFiles)"
-            $StringBytes = [System.Text.Encoding]::UTF8.GetBytes($FallbackString)
-            $MD5 = [System.Security.Cryptography.MD5]::Create()
-            $HashBytes = $MD5.ComputeHash($StringBytes)
-            $SessionHash = [BitConverter]::ToString($HashBytes) -replace '-',''
-            $MD5.Dispose()
+            # Simple fallback hash using the same core properties
+            $SessionIdentity = "$($Session.SVM)|$($Session.ClientAddress)|$($Session.SessionId)"
+            # Use a simple string hash if MD5 fails
+            $SessionHash = $SessionIdentity.GetHashCode().ToString()
         }
         
         # Check if this is a new session or if session data has changed
