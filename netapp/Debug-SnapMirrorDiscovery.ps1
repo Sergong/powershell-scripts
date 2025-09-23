@@ -73,10 +73,28 @@ try {
     Write-Host "[OK] Found $($AllSnapMirrors.Count) total SnapMirror relationships" -ForegroundColor Green
     Write-Host ""
     
+    # Debug: Show properties of first SnapMirror relationship to understand the object structure
+    if ($AllSnapMirrors.Count -gt 0) {
+        Write-Host "=== DEBUG: SNAPMIRROR OBJECT PROPERTIES ===" -ForegroundColor Yellow
+        $FirstSM = $AllSnapMirrors[0]
+        Write-Host "Available properties on SnapMirror object:" -ForegroundColor Yellow
+        $FirstSM | Get-Member -MemberType Property | ForEach-Object {
+            $PropName = $_.Name
+            $PropValue = $FirstSM.$PropName
+            Write-Host "  $PropName = $PropValue" -ForegroundColor Gray
+        }
+        Write-Host ""
+    }
+    
     # Display all SnapMirror relationships
     Write-Host "=== ALL SNAPMIRROR RELATIONSHIPS ===" -ForegroundColor Cyan
-    foreach ($SM in $AllSnapMirrors | Sort-Object Destination) {
-        $StatusColor = switch ($SM.Status) {
+    foreach ($SM in $AllSnapMirrors | Sort-Object { $_.Destination -or $_.DestinationLocation -or $_.DestinationPath }) {
+        # Handle different property names across ONTAP versions
+        $Source = $SM.Source -or $SM.SourceLocation -or $SM.SourcePath -or "Unknown"
+        $Destination = $SM.Destination -or $SM.DestinationLocation -or $SM.DestinationPath -or "Unknown"
+        $Status = $SM.Status -or $SM.MirrorState -or $SM.RelationshipStatus -or "Unknown"
+        
+        $StatusColor = switch ($Status) {
             "Idle" { "Green" }
             "Transferring" { "Yellow" }
             "Broken-off" { "Red" }
@@ -84,11 +102,17 @@ try {
             default { "White" }
         }
         
-        Write-Host "SnapMirror: $($SM.Source) -> $($SM.Destination)" -ForegroundColor White
-        Write-Host "  Status: $($SM.Status)" -ForegroundColor $StatusColor
-        Write-Host "  Relationship Status: $($SM.RelationshipStatus)" -ForegroundColor Gray
-        Write-Host "  Policy: $($SM.Policy)" -ForegroundColor Gray
-        Write-Host "  Type: $($SM.Type)" -ForegroundColor Gray
+        Write-Host "SnapMirror: $Source -> $Destination" -ForegroundColor White
+        Write-Host "  Status: $Status" -ForegroundColor $StatusColor
+        if ($SM.RelationshipStatus) {
+            Write-Host "  Relationship Status: $($SM.RelationshipStatus)" -ForegroundColor Gray
+        }
+        if ($SM.Policy) {
+            Write-Host "  Policy: $($SM.Policy)" -ForegroundColor Gray
+        }
+        if ($SM.Type) {
+            Write-Host "  Type: $($SM.Type)" -ForegroundColor Gray
+        }
         if ($SM.LagTime) {
             Write-Host "  Lag Time: $($SM.LagTime)" -ForegroundColor Gray
         }
