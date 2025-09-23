@@ -168,24 +168,24 @@ function Get-CIFSSessionData {
                 if (${Sessions}) {
                     Write-Log "Found $((${Sessions} | Measure-Object).Count) active session(s) for SVM $((${SVM}.Name))" "SUCCESS"
                     
-                    foreach (${Session} in ${Sessions}) {
+                    foreach ($Session in ${Sessions}) {
                         ${SessionData} = [PSCustomObject]@{
                             Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
                             Cluster = ${Cluster}
                             SVM = ${SVM}.Name
-                            SessionId = ${Session}.SessionId
-                            ConnectionId = ${Session}.ConnectionId
-                            ClientAddress = ${Session}.Address
-                            ClientName = ${Session}.NetbiosName
-                            AuthenticatedUser = ${Session}.WindowsUser
-                            OpenFiles = ${Session}.OpenFiles
-                            OpenShares = ${Session}.OpenShares
-                            IdleTime = ${Session}.IdleTime
-                            ConnectionTime = ${Session}.ConnectionTime
-                            Protocol = ${Session}.Protocol
-                            ProtocolVersion = ${Session}.ProtocolVersion
-                            LargeFileSupport = ${Session}.LargeMtu
-                            SessionState = ${Session}.State
+                            SessionId = $Session.SessionId
+                            ConnectionId = $Session.ConnectionId
+                            ClientAddress = $Session.Address
+                            ClientName = $Session.NetbiosName
+                            AuthenticatedUser = $Session.WindowsUser
+                            OpenFiles = $Session.OpenFiles
+                            OpenShares = $Session.OpenShares
+                            IdleTime = $Session.IdleTime
+                            ConnectionTime = $Session.ConnectionTime
+                            Protocol = $Session.Protocol
+                            ProtocolVersion = $Session.ProtocolVersion
+                            LargeFileSupport = $Session.LargeMtu
+                            SessionState = $Session.State
                         }
                         ${AllSessions} += ${SessionData}
                     }
@@ -241,20 +241,20 @@ function Get-UniqueSessionData {
     ${NewOrChangedSessions} = @()
     ${CurrentIterationKeys} = @()
     
-    foreach (${Session} in ${SessionData}) {
+    foreach ($Session in ${SessionData}) {
         # Create unique key for session (combination of cluster, SVM, and session ID)
-        ${SessionKey} = "$((${Session}.Cluster))|$((${Session}.SVM))|$((${Session}.SessionId))"
+        ${SessionKey} = "$($Session.Cluster)|$($Session.SVM)|$($Session.SessionId)"
         ${CurrentIterationKeys} += ${SessionKey}
         
         # Skip "No active sessions" entries from uniqueness tracking
-        if (${Session}.SessionId -eq "No active sessions") {
+        if ($Session.SessionId -eq "No active sessions") {
             # Always include "no sessions" entries but don't track them
-            ${NewOrChangedSessions} += ${Session}
+            ${NewOrChangedSessions} += $Session
             continue
         }
         
         # Create hash of session data for comparison (exclude timestamp)
-        ${SessionDataForHash} = ${Session} | Select-Object -Property * -ExcludeProperty Timestamp
+        ${SessionDataForHash} = $Session | Select-Object -Property * -ExcludeProperty Timestamp
         ${SessionHash} = (${SessionDataForHash} | ConvertTo-Json -Compress | Get-FileHash -Algorithm MD5).Hash
         
         # Check if this is a new session or if session data has changed
@@ -265,15 +265,15 @@ function Get-UniqueSessionData {
             ${script:TrackedSessions}[${SessionKey}] = @{
                 Hash = ${SessionHash}
                 LastSeen = Get-Date
-                Data = ${Session}
+                Data = $Session
             }
             
-            ${NewOrChangedSessions} += ${Session}
+            ${NewOrChangedSessions} += $Session
             
             if (${script:TrackedSessions}.ContainsKey(${SessionKey})) {
-                Write-Log "Session changed: SVM=$((${Session}.SVM)), SessionID=$((${Session}.SessionId))" "INFO"
+                Write-Log "Session changed: SVM=$($Session.SVM), SessionID=$($Session.SessionId)" "INFO"
             } else {
-                Write-Log "New session detected: SVM=$((${Session}.SVM)), SessionID=$((${Session}.SessionId))" "SUCCESS"
+                Write-Log "New session detected: SVM=$($Session.SVM), SessionID=$($Session.SessionId)" "SUCCESS"
             }
         }
     }
@@ -283,10 +283,10 @@ function Get-UniqueSessionData {
     foreach (${Key} in ${script:TrackedSessions}.Keys) {
         if (${CurrentIterationKeys} -notcontains ${Key}) {
             ${RemovedSession} = ${script:TrackedSessions}[${Key}].Data
-            Write-Log "Session ended: SVM=$((${RemovedSession}.SVM)), SessionID=$((${RemovedSession}.SessionId))" "WARNING"
+            Write-Log "Session ended: SVM=$($RemovedSession.SVM), SessionID=$($RemovedSession.SessionId)" "WARNING"
             
             # Add session end record to CSV
-            ${SessionEndData} = ${RemovedSession}.PSObject.Copy()
+            ${SessionEndData} = $RemovedSession.PSObject.Copy()
             ${SessionEndData}.Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
             ${SessionEndData}.SessionState = "Session Ended"
             ${NewOrChangedSessions} += ${SessionEndData}
