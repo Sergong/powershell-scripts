@@ -154,27 +154,60 @@ function Get-CIFSSessionData {
             return @()
         }
         
-        Write-Log "Found $(($SVMs | Measure-Object).Count) CIFS-enabled SVM(s)" "INFO"
+        $SVMCount = ($SVMs | Measure-Object).Count
+        Write-Log "Found $SVMCount CIFS-enabled SVM(s)" "INFO"
+        
+        # Debug: Show SVM properties for troubleshooting
+        foreach ($DebugSVM in $SVMs) {
+            $SVMProperties = @()
+            $DebugSVM | Get-Member -MemberType Property | ForEach-Object {
+                $PropName = $_.Name
+                try {
+                    $PropValue = $DebugSVM.$PropName
+                    if ($PropValue -ne $null -and $PropValue.ToString().Length -lt 50) {
+                        $SVMProperties += "$PropName=$PropValue"
+                    }
+                } catch {
+                    $SVMProperties += "$PropName=<error>"
+                }
+            }
+            Write-Log "DEBUG SVM Properties: $($SVMProperties -join '; ')" "INFO"
+        }
         
         $AllSessions = @()
         
         foreach ($SVM in $SVMs) {
             try {
-                Write-Log "Checking CIFS sessions for SVM: $($SVM.Name)" "INFO"
+                # Try multiple property names for SVM name
+                $SVMName = $null
+                $PossibleNameProperties = @('Name', 'VserverName', 'Vserver', 'VServer', 'SvmName')
+                foreach ($PropName in $PossibleNameProperties) {
+                    if ($SVM.$PropName -and $SVM.$PropName -ne $null) {
+                        $SVMName = $SVM.$PropName
+                        Write-Log "Using SVM property '$PropName' with value: $SVMName" "INFO"
+                        break
+                    }
+                }
+                
+                if (-not $SVMName) {
+                    Write-Log "ERROR: Could not determine SVM name from any property" "ERROR"
+                    continue
+                }
+                
+                Write-Log "Checking CIFS sessions for SVM: $SVMName" "INFO"
                 
                 # Get CIFS sessions for this SVM
-                $Sessions = Get-NcCifsSession -VserverContext $SVM.Name -ErrorAction SilentlyContinue
+                $Sessions = Get-NcCifsSession -VserverContext $SVMName -ErrorAction SilentlyContinue
                 
                 if ($Sessions) {
                     $SessionCount = ($Sessions | Measure-Object).Count
-                    $SVMName = $SVM.Name
                     Write-Log "Found $SessionCount active session(s) for SVM $SVMName" "SUCCESS"
                     
                     foreach ($Session in $Sessions) {
                         $SessionData = [PSCustomObject]@{
                             Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
                             Cluster = $Cluster
-                            SVM = $SVM.Name
+                            SVM = $SVMName
                             SessionId = $Session.SessionId
                             ConnectionId = $Session.ConnectionId
                             ClientAddress = $Session.Address
@@ -192,13 +225,13 @@ function Get-CIFSSessionData {
                         $AllSessions += $SessionData
                     }
                 } else {
-                    Write-Log "No active CIFS sessions found for SVM $($SVM.Name)" "INFO"
+                    Write-Log "No active CIFS sessions found for SVM $SVMName" "INFO"
                     
                     # Add entry showing no sessions for this SVM
                     $NoSessionData = [PSCustomObject]@{
                         Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
                         Cluster = $Cluster
-                        SVM = $SVM.Name
+                        SVM = $SVMName
                         SessionId = "No active sessions"
                         ConnectionId = ""
                         ClientAddress = ""
@@ -217,7 +250,8 @@ function Get-CIFSSessionData {
                 }
             }
             catch {
-                Write-Log "Error collecting sessions for SVM $($SVM.Name): $_" "ERROR"
+                $SVMDisplayName = if ($SVMName) { $SVMName } else { "<unknown>" }
+                Write-Log "Error collecting sessions for SVM $SVMDisplayName: $_" "ERROR"
             }
         }
         
