@@ -351,14 +351,18 @@ function Stop-Monitoring {
     
     # Disconnect from cluster if connected
     try {
-        $Connection = Get-NcController -ErrorAction SilentlyContinue
-        if ($Connection) {
+        # Check if disconnect cmdlet is available
+        if (Get-Command "Disconnect-NcController" -ErrorAction SilentlyContinue) {
+            # Try to disconnect gracefully
             Disconnect-NcController -ErrorAction SilentlyContinue
             Write-Log "Disconnected from NetApp cluster" "SUCCESS"
+        } else {
+            # No explicit disconnect cmdlet available - connection will close when session ends
+            Write-Log "NetApp cluster connection will close automatically when session ends" "INFO"
         }
     }
     catch {
-        Write-Log "Error during cleanup: $_" "WARNING"
+        Write-Log "Warning: Could not properly disconnect from cluster: $_" "WARNING"
     }
     
     Write-Log "CIFS Session Monitoring Stopped" "SUCCESS"
