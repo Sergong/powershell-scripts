@@ -160,13 +160,13 @@ function Get-CIFSSessionData {
         
         foreach (${SVM} in ${SVMs}) {
             try {
-                Write-Log "Checking CIFS sessions for SVM: ${SVM}.Name" "INFO"
+                Write-Log "Checking CIFS sessions for SVM: $((${SVM}.Name))" "INFO"
                 
                 # Get CIFS sessions for this SVM
                 ${Sessions} = Get-NcCifsSession -VserverContext ${SVM}.Name -ErrorAction SilentlyContinue
                 
                 if (${Sessions}) {
-                    Write-Log "Found $((${Sessions} | Measure-Object).Count) active session(s) for SVM ${SVM}.Name" "SUCCESS"
+                    Write-Log "Found $((${Sessions} | Measure-Object).Count) active session(s) for SVM $((${SVM}.Name))" "SUCCESS"
                     
                     foreach (${Session} in ${Sessions}) {
                         ${SessionData} = [PSCustomObject]@{
@@ -190,7 +190,7 @@ function Get-CIFSSessionData {
                         ${AllSessions} += ${SessionData}
                     }
                 } else {
-                    Write-Log "No active CIFS sessions found for SVM ${SVM}.Name" "INFO"
+                    Write-Log "No active CIFS sessions found for SVM $((${SVM}.Name))" "INFO"
                     
                     # Add entry showing no sessions for this SVM
                     ${NoSessionData} = [PSCustomObject]@{
@@ -215,7 +215,7 @@ function Get-CIFSSessionData {
                 }
             }
             catch {
-                Write-Log "Error collecting sessions for SVM ${SVM}.Name: ${_}" "ERROR"
+                Write-Log "Error collecting sessions for SVM $((${SVM}.Name)): ${_}" "ERROR"
             }
         }
         
@@ -243,7 +243,7 @@ function Get-UniqueSessionData {
     
     foreach (${Session} in ${SessionData}) {
         # Create unique key for session (combination of cluster, SVM, and session ID)
-        ${SessionKey} = "${Session}.Cluster|${Session}.SVM|${Session}.SessionId"
+        ${SessionKey} = "$((${Session}.Cluster))|$((${Session}.SVM))|$((${Session}.SessionId))"
         ${CurrentIterationKeys} += ${SessionKey}
         
         # Skip "No active sessions" entries from uniqueness tracking
@@ -271,9 +271,9 @@ function Get-UniqueSessionData {
             ${NewOrChangedSessions} += ${Session}
             
             if (${script:TrackedSessions}.ContainsKey(${SessionKey})) {
-                Write-Log "Session changed: SVM=${Session}.SVM, SessionID=${Session}.SessionId" "INFO"
+                Write-Log "Session changed: SVM=$((${Session}.SVM)), SessionID=$((${Session}.SessionId))" "INFO"
             } else {
-                Write-Log "New session detected: SVM=${Session}.SVM, SessionID=${Session}.SessionId" "SUCCESS"
+                Write-Log "New session detected: SVM=$((${Session}.SVM)), SessionID=$((${Session}.SessionId))" "SUCCESS"
             }
         }
     }
@@ -283,7 +283,7 @@ function Get-UniqueSessionData {
     foreach (${Key} in ${script:TrackedSessions}.Keys) {
         if (${CurrentIterationKeys} -notcontains ${Key}) {
             ${RemovedSession} = ${script:TrackedSessions}[${Key}].Data
-            Write-Log "Session ended: SVM=${RemovedSession}.SVM, SessionID=${RemovedSession}.SessionId" "WARNING"
+            Write-Log "Session ended: SVM=$((${RemovedSession}.SVM)), SessionID=$((${RemovedSession}.SessionId))" "WARNING"
             
             # Add session end record to CSV
             ${SessionEndData} = ${RemovedSession}.PSObject.Copy()
@@ -387,7 +387,12 @@ try {
         Write-Log "Connecting to NetApp cluster: ${Cluster}" "INFO"
         
         if (-not ${Credential}) {
+            Write-Host "Please provide credentials for NetApp cluster ${Cluster}" -ForegroundColor Yellow
             ${Credential} = Get-Credential -Message "Enter credentials for NetApp cluster ${Cluster}"
+            if (-not ${Credential}) {
+                Write-Log "No credentials provided. Exiting." "ERROR"
+                exit 1
+            }
         }
         
         Connect-NcController -Name ${Cluster} -Credential ${Credential} -ErrorAction Stop | Out-Null
