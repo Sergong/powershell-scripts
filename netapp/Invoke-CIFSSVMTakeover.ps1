@@ -300,8 +300,16 @@ try {
             Write-Log "Discovering CIFS LIFs on source SVM: $SourceSVM"
             try {
                 $AllSourceLIFs = Get-NcNetInterface -Controller $SourceController -VserverContext $SourceSVM
+                Write-Log "[DEBUG] Found $($AllSourceLIFs.Count) total LIFs on source SVM"
+                
+                # Debug: Show all LIFs for troubleshooting
+                foreach ($LIF in $AllSourceLIFs) {
+                    Write-Log "[DEBUG] LIF: $($LIF.InterfaceName), Protocols: $($LIF.DataProtocols -join ','), Role: $($LIF.Role), Status: $($LIF.AdministrativeStatus)"
+                }
+                
+                # Filter for CIFS LIFs (require admin up status for source since they should be active)
                 $CifsSourceLIFs = $AllSourceLIFs | Where-Object {
-                    $_.DataProtocols -contains "cifs" -and 
+                    ($_.DataProtocols -contains "cifs" -or $_.DataProtocols -contains "smb") -and 
                     $_.AdministrativeStatus -eq "up" -and
                     $_.Role -eq "data"
                 }
@@ -314,7 +322,12 @@ try {
                         Write-Log "  - $($LIF.InterfaceName): $($LIF.Address) (Node: $($LIF.CurrentNode))"
                     }
                 } else {
-                    throw "No active CIFS LIFs found on source SVM: $SourceSVM"
+                    Write-Log "[NOK] No active CIFS/SMB data LIFs found on source SVM: $SourceSVM" "ERROR"
+                    Write-Log "[INFO] Available LIF protocols on source SVM:" "INFO"
+                    $AllSourceLIFs | ForEach-Object {
+                        Write-Log "  - $($_.InterfaceName): $($_.DataProtocols -join ', ') (Role: $($_.Role), Status: $($_.AdministrativeStatus))" "INFO"
+                    }
+                    throw "No active CIFS/SMB data LIFs found on source SVM: $SourceSVM"
                 }
             } catch {
                 Write-Log "[NOK] Failed to discover source CIFS LIFs: $($_.Exception.Message)" "ERROR"
@@ -327,8 +340,16 @@ try {
             Write-Log "Discovering CIFS LIFs on target SVM: $TargetSVM"
             try {
                 $AllTargetLIFs = Get-NcNetInterface -Controller $TargetController -VserverContext $TargetSVM
+                Write-Log "[DEBUG] Found $($AllTargetLIFs.Count) total LIFs on target SVM"
+                
+                # Debug: Show all LIFs for troubleshooting
+                foreach ($LIF in $AllTargetLIFs) {
+                    Write-Log "[DEBUG] LIF: $($LIF.InterfaceName), Protocols: $($LIF.DataProtocols -join ','), Role: $($LIF.Role), Status: $($LIF.AdministrativeStatus)"
+                }
+                
+                # Filter for CIFS LIFs (don't require admin up status for target)
                 $CifsTargetLIFs = $AllTargetLIFs | Where-Object {
-                    $_.DataProtocols -contains "cifs" -and 
+                    ($_.DataProtocols -contains "cifs" -or $_.DataProtocols -contains "smb") -and 
                     $_.Role -eq "data"
                 }
                 
@@ -340,7 +361,12 @@ try {
                         Write-Log "  - $($LIF.InterfaceName): $($LIF.Address) (Node: $($LIF.CurrentNode), Status: $($LIF.AdministrativeStatus))"
                     }
                 } else {
-                    throw "No CIFS LIFs found on target SVM: $TargetSVM"
+                    Write-Log "[NOK] No CIFS/SMB data LIFs found on target SVM: $TargetSVM" "ERROR"
+                    Write-Log "[INFO] Available LIF protocols on target SVM:" "INFO"
+                    $AllTargetLIFs | ForEach-Object {
+                        Write-Log "  - $($_.InterfaceName): $($_.DataProtocols -join ', ') (Role: $($_.Role))" "INFO"
+                    }
+                    throw "No CIFS/SMB data LIFs found on target SVM: $TargetSVM"
                 }
             } catch {
                 Write-Log "[NOK] Failed to discover target CIFS LIFs: $($_.Exception.Message)" "ERROR"
