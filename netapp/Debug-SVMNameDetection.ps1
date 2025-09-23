@@ -110,17 +110,30 @@ function Show-SVMProperties {
         try {
             $PropValue = $SVM.$PropName
             if ($PropValue -ne $null) {
-                $DisplayValue = $PropValue.ToString()
-                # Truncate very long values
-                if ($DisplayValue.Length -gt 80) {
-                    $DisplayValue = $DisplayValue.Substring(0, 77) + "..."
+                # Handle different property types
+                if ($PropValue -is [Array] -or $PropValue -is [System.Collections.IEnumerable] -and $PropValue -isnot [string]) {
+                    # Handle arrays and collections
+                    try {
+                        $ArrayValues = @($PropValue) | ForEach-Object { $_.ToString() }
+                        $DisplayValue = "[$($ArrayValues -join ', ')]"
+                    } catch {
+                        $DisplayValue = "[Array with $($PropValue.Count) items]"
+                    }
+                } else {
+                    $DisplayValue = $PropValue.ToString()
                 }
+                
+                # Truncate very long values
+                if ($DisplayValue.Length -gt 100) {
+                    $DisplayValue = $DisplayValue.Substring(0, 97) + "..."
+                }
+                
                 Write-Log "  $PropName = $DisplayValue" "DEBUG"
             } else {
                 Write-Log "  $PropName = <null>" "DEBUG"
             }
         } catch {
-            Write-Log "  $PropName = <error accessing property>" "ERROR"
+            Write-Log "  $PropName = <error accessing property: $_>" "ERROR"
         }
     }
 }
@@ -156,7 +169,7 @@ try {
     Write-Log "ONTAP Version: $($ClusterInfo.ClusterVersion)" "INFO"
     Write-Host ""
     
-    # Get all SVMs (not just CIFS-enabled ones for broader testing)
+    # Get all data SVMs (filter out admin, system, and node SVMs)
     Write-Log "Retrieving all SVMs from cluster..." "INFO"
     $AllSVMs = Get-NcVserver
     
@@ -165,8 +178,31 @@ try {
         exit 1
     }
     
-    $SVMCount = ($AllSVMs | Measure-Object).Count
-    Write-Log "Found $SVMCount total SVM(s)" "SUCCESS"
+    Write-Log "Found $(($AllSVMs | Measure-Object).Count) total SVMs, filtering for data SVMs..." "INFO"
+    
+    # Filter for data SVMs only
+    $DataSVMs = $AllSVMs | Where-Object {
+        try {
+            $_.VserverType -eq "data"
+        } catch {
+            # Fallback: if VserverType property doesn't exist, include it
+            Write-Log "Warning: Could not check VserverType for SVM, including in analysis" "WARNING"
+            $true
+        }
+    }
+    
+    if (-not $DataSVMs) {
+        Write-Log "No data SVMs found on cluster $Cluster" "WARNING"
+        Write-Log "Available SVM types: $(($AllSVMs | ForEach-Object { try { $_.VserverType } catch { 'Unknown' } } | Sort-Object | Get-Unique) -join ', ')" "INFO"
+        exit 1
+    }
+    
+    $SVMCount = ($DataSVMs | Measure-Object).Count
+    Write-Log "Found $SVMCount data SVM(s)" "SUCCESS"
+    
+    # Show SVM type breakdown for reference
+    $SVMTypeBreakdown = $AllSVMs | Group-Object { try { $_.VserverType } catch { 'Unknown' } } | ForEach-Object { "$($_.Name): $($_.Count)" }
+    Write-Log "SVM type breakdown: $($SVMTypeBreakdown -join ', ')" "INFO"
     Write-Host ""
     
     # Test each SVM
@@ -174,7 +210,7 @@ try {
     $SuccessfulSVMs = @()
     $FailedSVMs = @()
     
-    foreach ($SVM in $AllSVMs) {
+    foreach ($SVM in $DataSVMs) {
         $SVMIndex++
         Write-Log "Processing SVM #$SVMIndex of $SVMCount" "INFO"
         Write-Host ""
@@ -187,11 +223,25 @@ try {
         $DetectedName = Test-SVMNameDetection -SVM $SVM
         
         if ($DetectedName) {
+            # Properly handle AllowedProtocols array
+            $ProtocolsDisplay = 'Unknown'
+            try {
+                if ($SVM.AllowedProtocols) {
+                    if ($SVM.AllowedProtocols -is [Array]) {
+                        $ProtocolsDisplay = $SVM.AllowedProtocols -join ','
+                    } else {
+                        $ProtocolsDisplay = $SVM.AllowedProtocols.ToString()
+                    }
+                }
+            } catch {
+                $ProtocolsDisplay = 'Error reading protocols'
+            }
+            
             $SuccessfulSVMs += [PSCustomObject]@{
                 Index = $SVMIndex
                 DetectedName = $DetectedName
                 State = $SVM.State
-                AllowedProtocols = if ($SVM.AllowedProtocols) { $SVM.AllowedProtocols -join ',' } else { 'Unknown' }
+                AllowedProtocols = $ProtocolsDisplay
             }
             
             # Test CIFS session retrieval if requested
@@ -245,7 +295,9 @@ try {
     # CIFS-specific analysis
     Write-Host ""
     Write-Log "=== CIFS-ENABLED SVMs ANALYSIS ===" "INFO"
-    $CIFSSVMs = $SuccessfulSVMs | Where-Object { $_.AllowedProtocols -match 'cifs' -and $_.State -eq 'running' }
+    $CIFSSVMs = $SuccessfulSVMs | Where-Object { 
+        $_.AllowedProtocols -match 'cifs' -and $_.State -eq 'running' 
+    }
     if ($CIFSSVMs) {
         Write-Log "CIFS-enabled running SVMs found: $(($CIFSSVMs | Measure-Object).Count)" "SUCCESS"
         foreach ($SVM in $CIFSSVMs) {

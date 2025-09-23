@@ -144,18 +144,38 @@ function Get-CIFSSessionData {
     try {
         Write-Log "Collecting CIFS session data for all SVMs..." "INFO"
         
-        # Get all SVMs with CIFS protocol enabled
+        # Get all data SVMs with CIFS protocol enabled
         $SVMs = Get-NcVserver | Where-Object { 
-            $_.AllowedProtocols -contains "cifs" -and $_.State -eq "running" 
+            # Filter for data SVMs only (exclude admin, system, node SVMs)
+            $IsDataSVM = $false
+            try {
+                $IsDataSVM = $_.VserverType -eq "data"
+            } catch {
+                # Fallback: if VserverType doesn't exist, assume it's a data SVM
+                $IsDataSVM = $true
+            }
+            
+            # Handle AllowedProtocols as array properly
+            $HasCifs = $false
+            try {
+                if ($_.AllowedProtocols) {
+                    $HasCifs = $_.AllowedProtocols -contains "cifs"
+                }
+            } catch {
+                # Fallback: try string comparison
+                $HasCifs = $_.AllowedProtocols -match "cifs"
+            }
+            
+            $IsDataSVM -and $HasCifs -and $_.State -eq "running"
         }
         
         if (-not $SVMs) {
-            Write-Log "No CIFS-enabled SVMs found on cluster $Cluster" "WARNING"
+            Write-Log "No CIFS-enabled data SVMs found on cluster $Cluster" "WARNING"
             return @()
         }
         
         $SVMCount = ($SVMs | Measure-Object).Count
-        Write-Log "Found $SVMCount CIFS-enabled SVM(s)" "INFO"
+        Write-Log "Found $SVMCount CIFS-enabled data SVM(s)" "INFO"
         
         # Debug: Show SVM properties for troubleshooting
         foreach ($DebugSVM in $SVMs) {
@@ -164,8 +184,17 @@ function Get-CIFSSessionData {
                 $PropName = $_.Name
                 try {
                     $PropValue = $DebugSVM.$PropName
-                    if ($PropValue -ne $null -and $PropValue.ToString().Length -lt 50) {
-                        $SVMProperties += "$PropName=$PropValue"
+                    if ($PropValue -ne $null) {
+                        # Handle arrays properly
+                        if ($PropValue -is [Array] -and $PropValue.Count -gt 0) {
+                            $DisplayValue = "[$($PropValue -join ',')]" 
+                        } else {
+                            $DisplayValue = $PropValue.ToString()
+                        }
+                        
+                        if ($DisplayValue.Length -lt 60) {
+                            $SVMProperties += "$PropName=$DisplayValue"
+                        }
                     }
                 } catch {
                     $SVMProperties += "$PropName=<error>"
