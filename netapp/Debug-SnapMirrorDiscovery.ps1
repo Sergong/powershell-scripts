@@ -78,44 +78,109 @@ try {
         Write-Host "=== DEBUG: SNAPMIRROR OBJECT PROPERTIES ===" -ForegroundColor Yellow
         $FirstSM = $AllSnapMirrors[0]
         Write-Host "Available properties on SnapMirror object:" -ForegroundColor Yellow
-        $FirstSM | Get-Member -MemberType Property | ForEach-Object {
-            $PropName = $_.Name
-            $PropValue = $FirstSM.$PropName
-            Write-Host "  $PropName = $PropValue" -ForegroundColor Gray
+        
+        # Get all properties and their values
+        $Properties = $FirstSM | Get-Member -MemberType Property | ForEach-Object { $_.Name }
+        foreach ($PropName in $Properties | Sort-Object) {
+            try {
+                $PropValue = $FirstSM.$PropName
+                $PropType = if ($PropValue -ne $null) { $PropValue.GetType().Name } else { "null" }
+                Write-Host "  $PropName ($PropType) = $PropValue" -ForegroundColor Gray
+            }
+            catch {
+                Write-Host "  $PropName = <Error accessing property>" -ForegroundColor Red
+            }
+        }
+        
+        Write-Host ""
+        Write-Host "Looking for likely source/destination properties:" -ForegroundColor Yellow
+        $LikelyProps = $Properties | Where-Object { 
+            $_ -match "source|destination|volume|path|location" 
+        }
+        foreach ($PropName in $LikelyProps) {
+            try {
+                $PropValue = $FirstSM.$PropName
+                Write-Host "  CANDIDATE: $PropName = $PropValue" -ForegroundColor Cyan
+            }
+            catch {
+                Write-Host "  CANDIDATE: $PropName = <Error>" -ForegroundColor Red
+            }
         }
         Write-Host ""
     }
     
     # Display all SnapMirror relationships
     Write-Host "=== ALL SNAPMIRROR RELATIONSHIPS ===" -ForegroundColor Cyan
-    foreach ($SM in $AllSnapMirrors | Sort-Object { $_.Destination -or $_.DestinationLocation -or $_.DestinationPath }) {
-        # Handle different property names across ONTAP versions
-        $Source = $SM.Source -or $SM.SourceLocation -or $SM.SourcePath -or "Unknown"
-        $Destination = $SM.Destination -or $SM.DestinationLocation -or $SM.DestinationPath -or "Unknown"
-        $Status = $SM.Status -or $SM.MirrorState -or $SM.RelationshipStatus -or "Unknown"
+    
+    $Counter = 0
+    foreach ($SM in $AllSnapMirrors) {
+        $Counter++
+        Write-Host "SnapMirror Relationship #$Counter:" -ForegroundColor White
         
-        $StatusColor = switch ($Status) {
-            "Idle" { "Green" }
-            "Transferring" { "Yellow" }
-            "Broken-off" { "Red" }
-            "Quiesced" { "Yellow" }
-            default { "White" }
+        # Try to find source and destination properties by checking common property patterns
+        $SourceProp = $null
+        $DestProp = $null
+        $StatusProp = $null
+        
+        # Get all properties of this object
+        $AllProps = $SM | Get-Member -MemberType Property | ForEach-Object { $_.Name }
+        
+        # Look for source properties
+        $SourceCandidates = @('SourceVolume', 'SourcePath', 'SourceLocation', 'Source', 'SourceCluster', 'SourceVserver')
+        foreach ($candidate in $SourceCandidates) {
+            if ($AllProps -contains $candidate -and $SM.$candidate -and $SM.$candidate -ne $true -and $SM.$candidate -ne $false) {
+                $SourceProp = $SM.$candidate
+                Write-Host "  Source ($candidate): $SourceProp" -ForegroundColor Green
+                break
+            }
         }
         
-        Write-Host "SnapMirror: $Source -> $Destination" -ForegroundColor White
-        Write-Host "  Status: $Status" -ForegroundColor $StatusColor
-        if ($SM.RelationshipStatus) {
-            Write-Host "  Relationship Status: $($SM.RelationshipStatus)" -ForegroundColor Gray
+        # Look for destination properties
+        $DestCandidates = @('DestinationVolume', 'DestinationPath', 'DestinationLocation', 'Destination', 'DestinationCluster', 'DestinationVserver')
+        foreach ($candidate in $DestCandidates) {
+            if ($AllProps -contains $candidate -and $SM.$candidate -and $SM.$candidate -ne $true -and $SM.$candidate -ne $false) {
+                $DestProp = $SM.$candidate
+                Write-Host "  Destination ($candidate): $DestProp" -ForegroundColor Green
+                break
+            }
         }
-        if ($SM.Policy) {
-            Write-Host "  Policy: $($SM.Policy)" -ForegroundColor Gray
+        
+        # Look for status properties
+        $StatusCandidates = @('Status', 'RelationshipStatus', 'MirrorState', 'State')
+        foreach ($candidate in $StatusCandidates) {
+            if ($AllProps -contains $candidate -and $SM.$candidate) {
+                $StatusProp = $SM.$candidate
+                $StatusColor = switch ($StatusProp.ToString()) {
+                    "Idle" { "Green" }
+                    "Transferring" { "Yellow" }
+                    "Broken-off" { "Red" }
+                    "Quiesced" { "Yellow" }
+                    default { "White" }
+                }
+                Write-Host "  Status ($candidate): $StatusProp" -ForegroundColor $StatusColor
+                break
+            }
         }
-        if ($SM.Type) {
-            Write-Host "  Type: $($SM.Type)" -ForegroundColor Gray
+        
+        # Show other interesting properties if available
+        $InterestingProps = @('Policy', 'Type', 'LagTime', 'Vserver', 'Volume')
+        foreach ($prop in $InterestingProps) {
+            if ($AllProps -contains $prop -and $SM.$prop) {
+                Write-Host "  $prop`: $($SM.$prop)" -ForegroundColor Gray
+            }
         }
-        if ($SM.LagTime) {
-            Write-Host "  Lag Time: $($SM.LagTime)" -ForegroundColor Gray
+        
+        # If we couldn't find obvious source/dest, show a few key properties for debugging
+        if (-not $SourceProp -or -not $DestProp) {
+            Write-Host "  DEBUG - Key properties:" -ForegroundColor Yellow
+            foreach ($prop in ($AllProps | Sort-Object)) {
+                $value = $SM.$prop
+                if ($value -and $value -ne $true -and $value -ne $false -and $value.ToString().Length -lt 100) {
+                    Write-Host "    $prop = $value" -ForegroundColor Gray
+                }
+            }
         }
+        
         Write-Host ""
     }
     
