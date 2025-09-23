@@ -242,7 +242,7 @@ function Get-CIFSSessionData {
                             SessionId = $Session.SessionId
                             ConnectionId = $Session.ConnectionId
                             ClientAddress = $Session.Address
-                            ClientName = $Session.NetbiosName
+                            ConnectedHostname = $Session.NetbiosName  # DNS CNAME/hostname used to connect
                             AuthenticatedUser = $Session.WindowsUser
                             OpenFiles = $Session.OpenFiles
                             OpenShares = $Session.OpenShares
@@ -266,7 +266,7 @@ function Get-CIFSSessionData {
                         SessionId = "No active sessions"
                         ConnectionId = ""
                         ClientAddress = ""
-                        ClientName = ""
+                        ConnectedHostname = ""  # DNS CNAME/hostname used to connect
                         AuthenticatedUser = ""
                         OpenFiles = 0
                         OpenShares = 0
@@ -306,7 +306,7 @@ function Get-UniqueSessionData {
         return $SessionData
     }
     
-    $NewOrChangedSessions = @()
+    $NewSessions = @()
     $CurrentIterationKeys = @()
     
     foreach ($Session in $SessionData) {
@@ -317,7 +317,7 @@ function Get-UniqueSessionData {
         # Skip "No active sessions" entries from uniqueness tracking
         if ($Session.SessionId -eq "No active sessions") {
             # Always include "no sessions" entries but don't track them
-            $NewOrChangedSessions += $Session
+            $NewSessions += $Session
             continue
         }
         
@@ -338,64 +338,42 @@ function Get-UniqueSessionData {
             $SessionHash = $SessionIdentity.GetHashCode().ToString()
         }
         
-        # Check if this is a new session or if session data has changed
-        if (-not $script:TrackedSessions.ContainsKey($SessionKey) -or 
-            $script:TrackedSessions[$SessionKey].Hash -ne $SessionHash) {
-            
-            # Update tracked sessions
+        # Check if this is a new session (only save new sessions, not changes or endings)
+        if (-not $script:TrackedSessions.ContainsKey($SessionKey)) {
+            # This is a new session - track it and save to CSV
             $script:TrackedSessions[$SessionKey] = @{
                 Hash = $SessionHash
                 LastSeen = Get-Date
                 Data = $Session
             }
             
-            $NewOrChangedSessions += $Session
-            
-            if ($script:TrackedSessions.ContainsKey($SessionKey)) {
-                Write-Log "Session changed: SVM=$($Session.SVM), SessionID=$($Session.SessionId)" "INFO"
-            } else {
-                Write-Log "New session detected: SVM=$($Session.SVM), SessionID=$($Session.SessionId)" "SUCCESS"
-            }
+            $NewSessions += $Session
+            Write-Log "New session detected: SVM=$($Session.SVM), SessionID=$($Session.SessionId), Client=$($Session.ClientAddress)" "SUCCESS"
+        } else {
+            # Session already exists - just update the LastSeen timestamp (no CSV save)
+            $script:TrackedSessions[$SessionKey].LastSeen = Get-Date
         }
     }
     
     # Clean up sessions that are no longer active (not seen in current iteration)
+    # Note: We still remove them from tracking but don't create CSV records for ended sessions
     $SessionsToRemove = @()
     foreach ($Key in $script:TrackedSessions.Keys) {
         if ($CurrentIterationKeys -notcontains $Key) {
             $RemovedSession = $script:TrackedSessions[$Key].Data
-            Write-Log "Session ended: SVM=$($RemovedSession.SVM), SessionID=$($RemovedSession.SessionId)" "WARNING"
-            
-            # Add session end record to CSV
-            try {
-                $SessionEndData = $RemovedSession | Select-Object *
-                $SessionEndData.Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                $SessionEndData.SessionState = "Session Ended"
-            } catch {
-                Write-Log "Error creating session end data: $($_.Exception.Message)" "WARNING"
-                # Create a minimal session end record
-                $SessionEndData = [PSCustomObject]@{
-                    Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-                    Cluster = $RemovedSession.Cluster
-                    SVM = $RemovedSession.SVM
-                    SessionId = $RemovedSession.SessionId
-                    SessionState = "Session Ended"
-                }
-            }
-            $NewOrChangedSessions += $SessionEndData
-            
+            Write-Log "Session ended: SVM=$($RemovedSession.SVM), SessionID=$($RemovedSession.SessionId), Client=$($RemovedSession.ClientAddress)" "INFO"
             $SessionsToRemove += $Key
         }
     }
     
-    # Remove ended sessions from tracking
+    # Remove ended sessions from tracking (no CSV records created)
     foreach ($Key in $SessionsToRemove) {
         $script:TrackedSessions.Remove($Key)
     }
     
-    Write-Log "Unique/Changed Sessions: $(($NewOrChangedSessions | Measure-Object).Count) out of $(($SessionData | Measure-Object).Count) total" "INFO"
+    Write-Log "New Sessions: $(($NewSessions | Measure-Object).Count) out of $(($SessionData | Measure-Object).Count) total" "INFO"
     
-    return $NewOrChangedSessions
+    return $NewSessions
 }
 
 # Function to save session data to CSV
@@ -411,7 +389,7 @@ function Save-SessionDataToCsv {
             
             if ($UniqueSessionData -and ($UniqueSessionData.Count -gt 0)) {
                 if ($WhatIfPreference) {
-                    Write-Log "Would save $(($UniqueSessionData | Measure-Object).Count) unique session records to $($script:CurrentCsvFile)" "INFO"
+                    Write-Log "Would save $(($UniqueSessionData | Measure-Object).Count) new session records to $($script:CurrentCsvFile)" "INFO"
                     $UniqueSessionData | Format-Table -AutoSize | Out-String | Write-Host
                 } else {
                     # Check if file exists to determine if we need headers
@@ -419,10 +397,10 @@ function Save-SessionDataToCsv {
                     
                     $UniqueSessionData | Export-Csv -Path $script:CurrentCsvFile -NoTypeInformation -Append:(-not $AddHeaders)
                     
-                    Write-Log "Saved $(($UniqueSessionData | Measure-Object).Count) unique session records to CSV file" "SUCCESS"
+                    Write-Log "Saved $(($UniqueSessionData | Measure-Object).Count) new session records to CSV file" "SUCCESS"
                 }
             } else {
-                Write-Log "No new or changed session data to save" "INFO"
+                Write-Log "No new session data to save" "INFO"
             }
         } else {
             Write-Log "No session data to process" "INFO"

@@ -252,6 +252,35 @@ try {
                     if ($Sessions) {
                         $SessionCount = ($Sessions | Measure-Object).Count
                         Write-Log "✅ Successfully retrieved $SessionCount CIFS session(s)" "SUCCESS"
+                        
+                        # Show properties of first session for debugging
+                        if ($Sessions.Count -gt 0) {
+                            Write-Log "=== CIFS SESSION PROPERTIES DEBUG ===" "DEBUG"
+                            $FirstSession = $Sessions[0]
+                            $SessionProperties = @()
+                            $FirstSession | Get-Member -MemberType Property | ForEach-Object {
+                                $PropName = $_.Name
+                                try {
+                                    $PropValue = $FirstSession.$PropName
+                                    if ($PropValue -ne $null) {
+                                        if ($PropValue -is [Array] -and $PropValue.Count -gt 0) {
+                                            $DisplayValue = "[$($PropValue -join ', ')]"
+                                        } else {
+                                            $DisplayValue = $PropValue.ToString()
+                                        }
+                                        if ($DisplayValue.Length -lt 100) {
+                                            $SessionProperties += "$PropName=$DisplayValue"
+                                        }
+                                    } else {
+                                        $SessionProperties += "$PropName=<null>"
+                                    }
+                                } catch {
+                                    $SessionProperties += "$PropName=<error>"
+                                }
+                            }
+                            Write-Log "First session properties: $($SessionProperties -join '; ')" "DEBUG"
+                            Write-Log "Note: NetbiosName contains: '$($FirstSession.NetbiosName)'" "DEBUG"
+                        }
                     } else {
                         Write-Log "✅ CIFS session retrieval successful (0 sessions found)" "SUCCESS"
                     }
