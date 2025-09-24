@@ -65,6 +65,31 @@ function Write-Log {
     }
 }
 
+# Function to silently detect SVM name without debug messages
+function Get-SVMNameSilently {
+    param($SVM)
+    
+    # Try multiple property names for SVM name (silent operation)
+    $SVMName = $null
+    $PossibleNameProperties = @('Name', 'VserverName', 'Vserver', 'VServer', 'SvmName')
+    
+    foreach ($PropName in $PossibleNameProperties) {
+        try {
+            $PropValue = $SVM.$PropName
+            if ($PropValue -and $PropValue -ne $null) {
+                if (-not $SVMName) {
+                    $SVMName = $PropValue
+                    break  # Found the name, exit early
+                }
+            }
+        } catch {
+            # Silent operation - continue to next property
+        }
+    }
+    
+    return $SVMName
+}
+
 # Function to test SVM name detection (same logic as main script)
 function Test-SVMNameDetection {
     param($SVM)
@@ -91,7 +116,9 @@ function Test-SVMNameDetection {
                 }
                 if (-not $SVMName) {
                     $SVMName = $PropValue
-                    Write-Log "🎯 Selected '$PropName' as SVM name: '$SVMName'" "SUCCESS"
+                    if ($DebugPreference -ne 'SilentlyContinue') {
+                        Write-Log "🎯 Selected '$PropName' as SVM name: '$SVMName'" "SUCCESS"
+                    }
                 }
             } else {
                 if ($DebugPreference -ne 'SilentlyContinue') {
@@ -115,7 +142,7 @@ function Test-SVMNameDetection {
 
 # Function to show all SVM properties for debugging
 function Show-SVMProperties {
-    param($SVM, $SVMIndex)
+    param($SVM, $SVMIndex, $DetectedName)
     
     if ($DebugPreference -ne 'SilentlyContinue') {
         Write-Log "=== SVM #$SVMIndex - All Properties ===" "DEBUG"
@@ -153,7 +180,7 @@ function Show-SVMProperties {
         }
     } else {
         # Show essential properties only
-        Write-Log "SVM #${SVMIndex}: Name=$($SVM.Name), State=$($SVM.State), Type=$($SVM.VserverType)" "INFO"
+        Write-Log "SVM #${SVMIndex}: Name=$DetectedName, State=$($SVM.State), Type=$($SVM.VserverType)" "INFO"
     }
 }
 
@@ -235,14 +262,19 @@ try {
         Write-Log "Processing SVM #$SVMIndex of $SVMCount" "INFO"
         Write-Host ""
         
-        # Show SVM properties (detailed if Debug enabled)
-        Show-SVMProperties -SVM $SVM -SVMIndex $SVMIndex
+        # Detect SVM name first (silent operation)
+        $DetectedName = Get-SVMNameSilently -SVM $SVM
+        
+        # Show SVM properties (detailed if Debug enabled) - now with detected name
+        Show-SVMProperties -SVM $SVM -SVMIndex $SVMIndex -DetectedName $DetectedName
         if ($DebugPreference -ne 'SilentlyContinue') {
             Write-Host ""
         }
         
-        # Test name detection
-        $DetectedName = Test-SVMNameDetection -SVM $SVM
+        # Run detailed name detection with debug output if in debug mode
+        if ($DebugPreference -ne 'SilentlyContinue') {
+            $TestName = Test-SVMNameDetection -SVM $SVM
+        }
         
         if ($DetectedName) {
             # Properly handle AllowedProtocols array
