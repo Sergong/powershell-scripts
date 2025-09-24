@@ -79,6 +79,7 @@ function Get-SVMNameSilently {
             if ($PropValue -and $PropValue -ne $null) {
                 if (-not $SVMName) {
                     $SVMName = $PropValue
+                    # Note: Logging would occur here in Monitor script, but this is silent function
                     break  # Found the name, exit early
                 }
             }
@@ -227,25 +228,68 @@ try {
     
     Write-Log "Found $(($AllSVMs | Measure-Object).Count) total SVMs, filtering for data SVMs..." "INFO"
     
-    # Filter for data SVMs only
+    # Filter for data SVMs with CIFS protocol enabled (same logic as Monitor-CIFSSessions.ps1)
     $DataSVMs = $AllSVMs | Where-Object {
+        # Filter for data SVMs only (exclude admin, system, node SVMs)
+        $IsDataSVM = $false
         try {
-            $_.VserverType -eq "data"
+            $IsDataSVM = $_.VserverType -eq "data"
         } catch {
-            # Fallback: if VserverType property doesn't exist, include it
-            Write-Log "Warning: Could not check VserverType for SVM, including in analysis" "WARNING"
-            $true
+            # Fallback: if VserverType doesn't exist, assume it's a data SVM
+            $IsDataSVM = $true
         }
+        
+        # Handle AllowedProtocols as array properly
+        $HasCifs = $false
+        try {
+            if ($_.AllowedProtocols) {
+                $HasCifs = $_.AllowedProtocols -contains "cifs"
+            }
+        } catch {
+            # Fallback: try string comparison
+            $HasCifs = $_.AllowedProtocols -match "cifs"
+        }
+        
+        # Apply same filtering as Monitor-CIFSSessions.ps1
+        $IsDataSVM -and $HasCifs -and $_.State -eq "running"
     }
     
     if (-not $DataSVMs) {
-        Write-Log "No data SVMs found on cluster $Cluster" "WARNING"
+        Write-Log "No CIFS-enabled data SVMs found on cluster $Cluster" "WARNING"
         Write-Log "Available SVM types: $(($AllSVMs | ForEach-Object { try { $_.VserverType } catch { 'Unknown' } } | Sort-Object | Get-Unique) -join ', ')" "INFO"
         exit 1
     }
     
     $SVMCount = ($DataSVMs | Measure-Object).Count
-    Write-Log "Found $SVMCount data SVM(s)" "SUCCESS"
+    Write-Log "Found $SVMCount CIFS-enabled data SVM(s)" "SUCCESS"
+    
+    # Debug: Show SVM properties for troubleshooting (matching Monitor script logic)
+    if ($DebugPreference -ne 'SilentlyContinue') {
+        foreach ($DebugSVM in $DataSVMs) {
+            $SVMProperties = @()
+            $DebugSVM | Get-Member -MemberType Property | ForEach-Object {
+                $PropName = $_.Name
+                try {
+                    $PropValue = $DebugSVM.$PropName
+                    if ($PropValue -ne $null) {
+                        # Handle arrays properly
+                        if ($PropValue -is [Array] -and $PropValue.Count -gt 0) {
+                            $DisplayValue = "[$($PropValue -join ',')]" 
+                        } else {
+                            $DisplayValue = $PropValue.ToString()
+                        }
+                        
+                        if ($DisplayValue.Length -lt 60) {
+                            $SVMProperties += "$PropName=$DisplayValue"
+                        }
+                    }
+                } catch {
+                    $SVMProperties += "$PropName=<error>"
+                }
+            }
+            Write-Log "DEBUG SVM Properties: $($SVMProperties -join '; ')" "DEBUG"
+        }
+    }
     
     # Show SVM type breakdown for reference
     $SVMTypeBreakdown = $AllSVMs | Group-Object { try { $_.VserverType } catch { 'Unknown' } } | ForEach-Object { "$($_.Name): $($_.Count)" }
