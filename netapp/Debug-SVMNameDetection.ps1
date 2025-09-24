@@ -155,7 +155,7 @@ function Show-SVMProperties {
         }
     } else {
         # Show essential properties only
-        Write-Log "SVM #$SVMIndex: Name=$($SVM.Name), State=$($SVM.State), Type=$($SVM.VserverType)" "INFO"
+        Write-Log "SVM #${SVMIndex}: Name=$($SVM.Name), State=$($SVM.State), Type=$($SVM.VserverType)" "INFO"
     }
 }
 
