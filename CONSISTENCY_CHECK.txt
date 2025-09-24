@@ -1,0 +1,8 @@
+=== CONSISTENCY CHECK COMPLETE ===
+Date: Wed 24 Sep 2025 13:15:51 BST
+
+Fixed inconsistencies between Debug-SVMNameDetection.ps1 and Monitor-CIFSSessions.ps1:
+1. SVM Filtering: Now both scripts filter for data SVMs with CIFS protocol AND running state
+2. AllowedProtocols handling: Now identical in both scripts
+3. SVM name detection: Uses same property list and logic
+4. Debug output: Added matching SVM properties debug output

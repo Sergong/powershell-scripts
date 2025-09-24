@@ -1,0 +1,2 @@
+CRITICAL PowerShell Rule: NEVER use $variable immediately followed by : in PowerShell scripts. This causes parsing errors because PowerShell treats it as drive/scope syntax. Always use ${variable} instead when followed by a colon.
+PowerShell Rule: When using [CmdletBinding()], do NOT define duplicate common parameters like -Debug, -Verbose, -WhatIf, etc. Use the built-in $DebugPreference, $VerbosePreference, and $WhatIfPreference variables instead.
