@@ -18,11 +18,17 @@
 .PARAMETER TestSessionRetrieval
     Also test CIFS session retrieval for each detected SVM (without showing session details).
 
+.PARAMETER Debug
+    Enable verbose DEBUG output showing all SVM properties and detailed diagnostics.
+
 .EXAMPLE
     .\Debug-SVMNameDetection.ps1 -Cluster "cluster01.domain.com"
 
 .EXAMPLE
     .\Debug-SVMNameDetection.ps1 -Cluster "10.1.1.100" -TestSessionRetrieval
+
+.EXAMPLE
+    .\Debug-SVMNameDetection.ps1 -Cluster "cluster01.domain.com" -TestSessionRetrieval -Debug
 
 .NOTES
     Author: PowerShell Scripts Repository
@@ -40,7 +46,10 @@ param(
     [System.Management.Automation.PSCredential]$Credential,
     
     [Parameter(Mandatory = $false)]
-    [switch]$TestSessionRetrieval
+    [switch]$TestSessionRetrieval,
+    
+    [Parameter(Mandatory = $false)]
+    [switch]$Debug
 )
 
 # Function to write log messages with colors
@@ -62,7 +71,15 @@ function Write-Log {
 function Test-SVMNameDetection {
     param($SVM)
     
-    # Try multiple property names for SVM name (suppress verbose debugging)
+    if ($Debug) {
+        Write-Log "=== Testing SVM Name Detection ===" "DEBUG"
+        Write-Log "Available properties on SVM object:" "DEBUG"
+        $AllProperties = $SVM | Get-Member -MemberType Property | ForEach-Object { $_.Name }
+        Write-Log "Properties: $($AllProperties -join ', ')" "DEBUG"
+        Write-Log "Testing possible SVM name properties:" "DEBUG"
+    }
+    
+    # Try multiple property names for SVM name
     $SVMName = $null
     $PossibleNameProperties = @('Name', 'VserverName', 'Vserver', 'VServer', 'SvmName')
     
@@ -71,13 +88,22 @@ function Test-SVMNameDetection {
         try {
             $PropValue = $SVM.$PropName
             if ($PropValue -and $PropValue -ne $null) {
+                if ($Debug) {
+                    Write-Log "✅ Property '$PropName' exists with value: '$PropValue'" "SUCCESS"
+                }
                 if (-not $SVMName) {
                     $SVMName = $PropValue
                     Write-Log "🎯 Selected '$PropName' as SVM name: '$SVMName'" "SUCCESS"
                 }
+            } else {
+                if ($Debug) {
+                    Write-Log "❌ Property '$PropName' is null/empty" "WARNING"
+                }
             }
         } catch {
-            # Suppress error details - just continue trying other properties
+            if ($Debug) {
+                Write-Log "❌ Property '$PropName' does not exist or error accessing: $_" "ERROR"
+            }
         }
     }
     
@@ -89,12 +115,48 @@ function Test-SVMNameDetection {
     return $SVMName
 }
 
-# Function to show all SVM properties for debugging (now simplified)
+# Function to show all SVM properties for debugging
 function Show-SVMProperties {
     param($SVM, $SVMIndex)
     
-    # Only show essential properties to reduce noise
-    Write-Log "SVM #$SVMIndex: Name=$($SVM.Name), State=$($SVM.State), Type=$($SVM.VserverType)" "INFO"
+    if ($Debug) {
+        Write-Log "=== SVM #$SVMIndex - All Properties ===" "DEBUG"
+        
+        $SVM | Get-Member -MemberType Property | ForEach-Object {
+            $PropName = $_.Name
+            try {
+                $PropValue = $SVM.$PropName
+                if ($PropValue -ne $null) {
+                    # Handle different property types
+                    if ($PropValue -is [Array] -or $PropValue -is [System.Collections.IEnumerable] -and $PropValue -isnot [string]) {
+                        # Handle arrays and collections
+                        try {
+                            $ArrayValues = @($PropValue) | ForEach-Object { $_.ToString() }
+                            $DisplayValue = "[$($ArrayValues -join ', ')]"
+                        } catch {
+                            $DisplayValue = "[Array with $($PropValue.Count) items]"
+                        }
+                    } else {
+                        $DisplayValue = $PropValue.ToString()
+                    }
+                    
+                    # Truncate very long values
+                    if ($DisplayValue.Length -gt 100) {
+                        $DisplayValue = $DisplayValue.Substring(0, 97) + "..."
+                    }
+                    
+                    Write-Log "  $PropName = $DisplayValue" "DEBUG"
+                } else {
+                    Write-Log "  $PropName = <null>" "DEBUG"
+                }
+            } catch {
+                Write-Log "  $PropName = <error accessing property: $_>" "ERROR"
+            }
+        }
+    } else {
+        # Show essential properties only
+        Write-Log "SVM #$SVMIndex: Name=$($SVM.Name), State=$($SVM.State), Type=$($SVM.VserverType)" "INFO"
+    }
 }
 
 # Main execution
@@ -105,6 +167,7 @@ try {
     
     Write-Log "Target Cluster: $Cluster" "INFO"
     Write-Log "Test Session Retrieval: $TestSessionRetrieval" "INFO"
+    Write-Log "Debug Mode: $Debug" "INFO"
     Write-Host ""
     
     # Get credentials if not provided
@@ -174,7 +237,13 @@ try {
         Write-Log "Processing SVM #$SVMIndex of $SVMCount" "INFO"
         Write-Host ""
         
-        # Test name detection (suppress verbose property display)
+        # Show SVM properties (detailed if Debug enabled)
+        Show-SVMProperties -SVM $SVM -SVMIndex $SVMIndex
+        if ($Debug) {
+            Write-Host ""
+        }
+        
+        # Test name detection
         $DetectedName = Test-SVMNameDetection -SVM $SVM
         
         if ($DetectedName) {
@@ -208,9 +277,9 @@ try {
                         $SessionCount = ($Sessions | Measure-Object).Count
                         Write-Log "✅ Successfully retrieved $SessionCount CIFS session(s)" "SUCCESS"
                         
-                        # Show properties of first session for debugging
+                        # Show properties of first session
                         if ($Sessions.Count -gt 0) {
-                            Write-Log "=== CIFS SESSION PROPERTIES DEBUG ===" "DEBUG"
+                            Write-Log "=== CIFS SESSION PROPERTIES ===" "INFO"
                             $FirstSession = $Sessions[0]
                             $SessionProperties = @()
                             $FirstSession | Get-Member -MemberType Property | ForEach-Object {
@@ -233,8 +302,8 @@ try {
                                     $SessionProperties += "$PropName=<error>"
                                 }
                             }
-                            Write-Log "First session properties: $($SessionProperties -join '; ')" "DEBUG"
-                            Write-Log "Note: NetbiosName contains: '$($FirstSession.NetbiosName)'" "DEBUG"
+                            Write-Log "First session properties: $($SessionProperties -join '; ')" "INFO"
+                            Write-Log "NetbiosName field contains: '$($FirstSession.NetbiosName)'" "INFO"
                         }
                     } else {
                         Write-Log "✅ CIFS session retrieval successful (0 sessions found)" "SUCCESS"
