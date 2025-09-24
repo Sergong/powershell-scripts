@@ -20,6 +20,7 @@
 
 .PARAMETER Debug
     Enable verbose DEBUG output showing all SVM properties and detailed diagnostics.
+    This uses PowerShell's built-in -Debug common parameter.
 
 .EXAMPLE
     .\Debug-SVMNameDetection.ps1 -Cluster "cluster01.domain.com"
@@ -46,10 +47,7 @@ param(
     [System.Management.Automation.PSCredential]$Credential,
     
     [Parameter(Mandatory = $false)]
-    [switch]$TestSessionRetrieval,
-    
-    [Parameter(Mandatory = $false)]
-    [switch]$Debug
+    [switch]$TestSessionRetrieval
 )
 
 # Function to write log messages with colors
@@ -71,7 +69,7 @@ function Write-Log {
 function Test-SVMNameDetection {
     param($SVM)
     
-    if ($Debug) {
+    if ($DebugPreference -ne 'SilentlyContinue') {
         Write-Log "=== Testing SVM Name Detection ===" "DEBUG"
         Write-Log "Available properties on SVM object:" "DEBUG"
         $AllProperties = $SVM | Get-Member -MemberType Property | ForEach-Object { $_.Name }
@@ -88,7 +86,7 @@ function Test-SVMNameDetection {
         try {
             $PropValue = $SVM.$PropName
             if ($PropValue -and $PropValue -ne $null) {
-                if ($Debug) {
+                if ($DebugPreference -ne 'SilentlyContinue') {
                     Write-Log "✅ Property '$PropName' exists with value: '$PropValue'" "SUCCESS"
                 }
                 if (-not $SVMName) {
@@ -96,12 +94,12 @@ function Test-SVMNameDetection {
                     Write-Log "🎯 Selected '$PropName' as SVM name: '$SVMName'" "SUCCESS"
                 }
             } else {
-                if ($Debug) {
+                if ($DebugPreference -ne 'SilentlyContinue') {
                     Write-Log "❌ Property '$PropName' is null/empty" "WARNING"
                 }
             }
         } catch {
-            if ($Debug) {
+            if ($DebugPreference -ne 'SilentlyContinue') {
                 Write-Log "❌ Property '$PropName' does not exist or error accessing: $_" "ERROR"
             }
         }
@@ -119,7 +117,7 @@ function Test-SVMNameDetection {
 function Show-SVMProperties {
     param($SVM, $SVMIndex)
     
-    if ($Debug) {
+    if ($DebugPreference -ne 'SilentlyContinue') {
         Write-Log "=== SVM #$SVMIndex - All Properties ===" "DEBUG"
         
         $SVM | Get-Member -MemberType Property | ForEach-Object {
@@ -167,7 +165,7 @@ try {
     
     Write-Log "Target Cluster: $Cluster" "INFO"
     Write-Log "Test Session Retrieval: $TestSessionRetrieval" "INFO"
-    Write-Log "Debug Mode: $Debug" "INFO"
+    Write-Log "Debug Mode: $($DebugPreference -ne 'SilentlyContinue')" "INFO"
     Write-Host ""
     
     # Get credentials if not provided
@@ -239,7 +237,7 @@ try {
         
         # Show SVM properties (detailed if Debug enabled)
         Show-SVMProperties -SVM $SVM -SVMIndex $SVMIndex
-        if ($Debug) {
+        if ($DebugPreference -ne 'SilentlyContinue') {
             Write-Host ""
         }
         
