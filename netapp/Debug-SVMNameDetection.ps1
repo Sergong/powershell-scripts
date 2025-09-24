@@ -291,11 +291,23 @@ try {
                 $ProtocolsDisplay = 'Error reading protocols'
             }
             
+            # Always check CIFS session count for analysis (regardless of TestSessionRetrieval flag)
+            $SessionCount = 'N/A'
+            if ($ProtocolsDisplay -match 'cifs') {
+                try {
+                    $Sessions = Get-NcCifsSession -VserverContext $DetectedName -ErrorAction SilentlyContinue
+                    $SessionCount = if ($Sessions) { ($Sessions | Measure-Object).Count } else { 0 }
+                } catch {
+                    $SessionCount = 'Error'
+                }
+            }
+            
             $SuccessfulSVMs += [PSCustomObject]@{
                 Index = $SVMIndex
                 DetectedName = $DetectedName
                 State = $SVM.State
                 AllowedProtocols = $ProtocolsDisplay
+                SessionCount = $SessionCount
             }
             
             # Test CIFS session retrieval if requested
@@ -390,9 +402,15 @@ try {
     }
     if ($CIFSSVMs) {
         Write-Log "CIFS-enabled running SVMs found: $(($CIFSSVMs | Measure-Object).Count)" "SUCCESS"
+        $TotalSessions = 0
         foreach ($SVM in $CIFSSVMs) {
-            Write-Log "  CIFS SVM: '$($SVM.DetectedName)'" "SUCCESS"
+            $SessionDisplay = if ($SVM.SessionCount -eq 'Error') { 'Error' } elseif ($SVM.SessionCount -eq 'N/A') { 'N/A' } else { "$($SVM.SessionCount) sessions" }
+            Write-Log "  CIFS SVM: '$($SVM.DetectedName)' - $SessionDisplay" "SUCCESS"
+            if ($SVM.SessionCount -match '^\d+$') {
+                $TotalSessions += [int]$SVM.SessionCount
+            }
         }
+        Write-Log "Total active CIFS sessions across all SVMs: $TotalSessions" "INFO"
         Write-Log "✅ Monitor-CIFSSessions.ps1 should work correctly with these SVMs" "SUCCESS"
     } else {
         Write-Log "❌ No CIFS-enabled running SVMs found" "WARNING"
