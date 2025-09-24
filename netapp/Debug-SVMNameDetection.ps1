@@ -62,32 +62,22 @@ function Write-Log {
 function Test-SVMNameDetection {
     param($SVM)
     
-    Write-Log "=== Testing SVM Name Detection ===" "DEBUG"
-    
-    # Try multiple property names for SVM name
+    # Try multiple property names for SVM name (suppress verbose debugging)
     $SVMName = $null
     $PossibleNameProperties = @('Name', 'VserverName', 'Vserver', 'VServer', 'SvmName')
     
-    Write-Log "Available properties on SVM object:" "DEBUG"
-    $AllProperties = $SVM | Get-Member -MemberType Property | ForEach-Object { $_.Name }
-    Write-Log "Properties: $($AllProperties -join ', ')" "DEBUG"
-    
-    Write-Log "Testing possible SVM name properties:" "DEBUG"
     foreach ($PropName in $PossibleNameProperties) {
         $PropValue = $null
         try {
             $PropValue = $SVM.$PropName
             if ($PropValue -and $PropValue -ne $null) {
-                Write-Log "✅ Property '$PropName' exists with value: '$PropValue'" "SUCCESS"
                 if (-not $SVMName) {
                     $SVMName = $PropValue
                     Write-Log "🎯 Selected '$PropName' as SVM name: '$SVMName'" "SUCCESS"
                 }
-            } else {
-                Write-Log "❌ Property '$PropName' is null/empty" "WARNING"
             }
         } catch {
-            Write-Log "❌ Property '$PropName' does not exist or error accessing: $_" "ERROR"
+            # Suppress error details - just continue trying other properties
         }
     }
     
@@ -99,43 +89,12 @@ function Test-SVMNameDetection {
     return $SVMName
 }
 
-# Function to show all SVM properties for debugging
+# Function to show all SVM properties for debugging (now simplified)
 function Show-SVMProperties {
     param($SVM, $SVMIndex)
     
-    Write-Log "=== SVM #$SVMIndex - All Properties ===" "DEBUG"
-    
-    $SVM | Get-Member -MemberType Property | ForEach-Object {
-        $PropName = $_.Name
-        try {
-            $PropValue = $SVM.$PropName
-            if ($PropValue -ne $null) {
-                # Handle different property types
-                if ($PropValue -is [Array] -or $PropValue -is [System.Collections.IEnumerable] -and $PropValue -isnot [string]) {
-                    # Handle arrays and collections
-                    try {
-                        $ArrayValues = @($PropValue) | ForEach-Object { $_.ToString() }
-                        $DisplayValue = "[$($ArrayValues -join ', ')]"
-                    } catch {
-                        $DisplayValue = "[Array with $($PropValue.Count) items]"
-                    }
-                } else {
-                    $DisplayValue = $PropValue.ToString()
-                }
-                
-                # Truncate very long values
-                if ($DisplayValue.Length -gt 100) {
-                    $DisplayValue = $DisplayValue.Substring(0, 97) + "..."
-                }
-                
-                Write-Log "  $PropName = $DisplayValue" "DEBUG"
-            } else {
-                Write-Log "  $PropName = <null>" "DEBUG"
-            }
-        } catch {
-            Write-Log "  $PropName = <error accessing property: $_>" "ERROR"
-        }
-    }
+    # Only show essential properties to reduce noise
+    Write-Log "SVM #$SVMIndex: Name=$($SVM.Name), State=$($SVM.State), Type=$($SVM.VserverType)" "INFO"
 }
 
 # Main execution
@@ -215,11 +174,7 @@ try {
         Write-Log "Processing SVM #$SVMIndex of $SVMCount" "INFO"
         Write-Host ""
         
-        # Show all properties for debugging
-        Show-SVMProperties -SVM $SVM -SVMIndex $SVMIndex
-        Write-Host ""
-        
-        # Test name detection
+        # Test name detection (suppress verbose property display)
         $DetectedName = Test-SVMNameDetection -SVM $SVM
         
         if ($DetectedName) {
