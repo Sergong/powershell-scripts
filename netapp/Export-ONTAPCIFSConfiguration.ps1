@@ -133,7 +133,75 @@ try {
     $ExportSummary.ExportedFiles += $SharesCSV
     Write-Log "[OK] CIFS shares details exported to: $SharesCSV (arrays converted to semicolon-separated values)"
 
-    # Step 2: Export CIFS Share ACLs
+    # Step 2: Export CIFS Server Configuration (including home directory search path)
+    Write-Log "Collecting CIFS server configuration..."
+    try {
+        $CifsServerConfig = Get-NcCifsServer -Controller $SourceController -VserverContext $SourceSVM
+        
+        if ($CifsServerConfig) {
+            Write-Log "[OK] Found CIFS server: $($CifsServerConfig.CifsServer)"
+            Write-Log "  Domain: $($CifsServerConfig.Domain)"
+            Write-Log "  Status: $($CifsServerConfig.AdministrativeStatus)"
+            
+            # Check for home directory search path configuration
+            $HomeDirectorySearchPaths = $null
+            try {
+                # Try to get home directory search paths (may not be available in all ONTAP versions)
+                $HomeDirectorySearchPaths = Get-NcCifsHomeDirectorySearchPath -Controller $SourceController -VserverContext $SourceSVM -ErrorAction SilentlyContinue
+            } catch {
+                Write-Log "[INFO] Home directory search path cmdlet not available, attempting alternative method" "INFO"
+                # Alternative: Try to get via CIFS options
+                try {
+                    $CifsOptions = Get-NcCifsOption -Controller $SourceController -VserverContext $SourceSVM -ErrorAction SilentlyContinue
+                    if ($CifsOptions -and $CifsOptions.HomeDirectorySearchPaths) {
+                        $HomeDirectorySearchPaths = $CifsOptions.HomeDirectorySearchPaths
+                    }
+                } catch {
+                    Write-Log "[WARNING] Could not retrieve home directory search paths via alternative method" "WARNING"
+                }
+            }
+            
+            # Create CIFS server configuration export
+            $CifsServerExport = @{
+                CifsServer = $CifsServerConfig.CifsServer
+                Domain = $CifsServerConfig.Domain
+                AdministrativeStatus = $CifsServerConfig.AdministrativeStatus
+                Workgroup = $CifsServerConfig.Workgroup
+                HomeDirectorySearchPaths = $HomeDirectorySearchPaths
+                ExportTimestamp = $ExportTimestamp
+            }
+            
+            $CifsServerFile = Join-Path $ExportDirectory "CIFS-Server-Config.json"
+            $CifsServerExport | ConvertTo-Json -Depth 10 | Out-File -FilePath $CifsServerFile -Encoding UTF8
+            $ExportSummary.ExportedFiles += $CifsServerFile
+            $ExportSummary.CifsServerConfig = $CifsServerExport
+            
+            Write-Log "[OK] CIFS server configuration exported to: $CifsServerFile"
+            
+            if ($HomeDirectorySearchPaths) {
+                if ($HomeDirectorySearchPaths -is [array] -and $HomeDirectorySearchPaths.Count -gt 0) {
+                    Write-Log "[OK] Found home directory search paths: $($HomeDirectorySearchPaths -join ', ')"
+                } elseif ($HomeDirectorySearchPaths -is [string] -and $HomeDirectorySearchPaths -ne "") {
+                    Write-Log "[OK] Found home directory search path: $HomeDirectorySearchPaths"
+                } else {
+                    Write-Log "[WARNING] Home directory search paths appear to be empty" "WARNING"
+                }
+            } else {
+                Write-Log "[WARNING] No home directory search paths found - this may affect dynamic share functionality" "WARNING"
+                if ($DynamicShares.Count -gt 0) {
+                    Write-Log "[WARNING] Dynamic shares found but no home directory search paths configured!" "WARNING"
+                    Write-Log "[WARNING] Dynamic shares may not work properly without home directory search paths" "WARNING"
+                }
+            }
+            
+        } else {
+            Write-Log "[WARNING] No CIFS server configuration found on source SVM" "WARNING"
+        }
+    } catch {
+        Write-Log "[WARNING] Failed to export CIFS server configuration: $($_.Exception.Message)" "WARNING"
+    }
+
+    # Step 3: Export CIFS Share ACLs
     Write-Log "Collecting CIFS share ACLs..."
     $AllShareACLs = Get-NcCifsShareAcl -Controller $SourceController -VserverContext $SourceSVM
     
@@ -159,7 +227,7 @@ try {
     $ShareACLs | Select-Object Share, UserOrGroup, UserGroupType, Permission | Export-Csv -Path $ACLsCSV -NoTypeInformation
     $ExportSummary.ExportedFiles += $ACLsCSV
 
-    # Step 3: Extract and export volume names from share paths
+    # Step 4: Extract and export volume names from share paths
     Write-Log "Extracting volume names from CIFS share paths..."
     $ShareVolumes = @()
     
@@ -220,7 +288,7 @@ try {
         Write-Log "[NOK] No volumes found from share paths" "WARNING"
     }
 
-    # Step 4: Create Import Instructions File
+    # Step 5: Create Import Instructions File
     $InstructionsFile = Join-Path $ExportDirectory "IMPORT-INSTRUCTIONS.txt"
     $Instructions = @"
 ONTAP CIFS CONFIGURATION IMPORT INSTRUCTIONS
@@ -264,7 +332,7 @@ Generated on: $(Get-Date)
     $Instructions | Out-File -FilePath $InstructionsFile -Encoding UTF8
     $ExportSummary.ExportedFiles += $InstructionsFile
 
-    # Step 5: Create Export Summary
+    # Step 6: Create Export Summary
     $SummaryFile = Join-Path $ExportDirectory "Export-Summary.json"
     $ExportSummary | ConvertTo-Json -Depth 10 | Out-File -FilePath $SummaryFile -Encoding UTF8
     

@@ -883,9 +883,10 @@ try {
     if ($ExportPath -and (Test-Path $ExportPath)) {
         Write-Log "Processing exported CIFS shares and volume mounting..."
         
-        # Load exported shares and ACLs directly
+        # Load exported shares, ACLs, and CIFS server configuration
         $SharesFile = Join-Path $ExportPath "CIFS-Shares.json"
         $ACLsFile = Join-Path $ExportPath "CIFS-ShareACLs.json"
+        $CifsServerConfigFile = Join-Path $ExportPath "CIFS-Server-Config.json"
         
         if ((Test-Path $SharesFile) -and (Test-Path $ACLsFile)) {
             try {
@@ -898,6 +899,84 @@ try {
                 $ACLsForProcessing = $ExportedACLs | Where-Object { $_.Share -notin @("admin$", "c$", "ipc$") }
                 
                 Write-Log "[OK] Found $($SharesForProcessing.Count) exported shares and $($ACLsForProcessing.Count) exported ACLs"
+                
+                # Load and apply CIFS server configuration (home directory search paths)
+                $CifsServerConfig = $null
+                if (Test-Path $CifsServerConfigFile) {
+                    try {
+                        $CifsServerConfig = Get-Content -Path $CifsServerConfigFile | ConvertFrom-Json
+                        Write-Log "[OK] Loaded CIFS server configuration from export"
+                        
+                        # Apply home directory search paths if they exist
+                        if ($CifsServerConfig.HomeDirectorySearchPaths) {
+                            Write-Log "[INFO] Configuring home directory search paths for dynamic shares..."
+                            
+                            $SearchPaths = $CifsServerConfig.HomeDirectorySearchPaths
+                            if ($SearchPaths -is [string]) {
+                                $SearchPaths = @($SearchPaths)  # Convert single path to array
+                            }
+                            
+                            if ($SearchPaths.Count -gt 0) {
+                                Write-Log "[INFO] Found $($SearchPaths.Count) home directory search paths: $($SearchPaths -join ', ')"
+                                
+                                if (!$WhatIf) {
+                                    try {
+                                        # Try to set home directory search paths
+                                        # Different methods for different ONTAP versions
+                                        try {
+                                            # Method 1: Direct cmdlet (newer versions)
+                                            foreach ($SearchPath in $SearchPaths) {
+                                                Set-NcCifsHomeDirectorySearchPath -Controller $TargetController -VserverContext $TargetSVM -Path $SearchPath -ErrorAction SilentlyContinue
+                                                Write-Log "[OK] Set home directory search path: $SearchPath"
+                                            }
+                                        } catch {
+                                            Write-Log "[INFO] Direct cmdlet not available, trying alternative method" "INFO"
+                                            
+                                            # Method 2: Via CIFS options (older versions)
+                                            try {
+                                                Set-NcCifsOption -Controller $TargetController -VserverContext $TargetSVM -HomeDirectorySearchPaths $SearchPaths
+                                                Write-Log "[OK] Set home directory search paths via CIFS options: $($SearchPaths -join ', ')"
+                                            } catch {
+                                                Write-Log "[WARNING] Could not set home directory search paths via CIFS options: $($_.Exception.Message)" "WARNING"
+                                                
+                                                # Method 3: ZAPI fallback
+                                                try {
+                                                    Write-Log "[INFO] Attempting to set home directory search paths via ZAPI" "INFO"
+                                                    
+                                                    $SearchPathsString = $SearchPaths -join ','
+                                                    $zapiXml = @"
+<cifs-server-modify>
+    <vserver>$TargetSVM</vserver>
+    <home-directory-search-paths>$SearchPathsString</home-directory-search-paths>
+</cifs-server-modify>
+"@
+                                                    $result = Invoke-NcSystemApi -Controller $TargetController -Request $zapiXml
+                                                    Write-Log "[OK] Set home directory search paths via ZAPI: $SearchPathsString"
+                                                } catch {
+                                                    Write-Log "[NOK] Failed to set home directory search paths via all methods: $($_.Exception.Message)" "ERROR"
+                                                    Write-Log "[NOK] Dynamic shares may not work properly without home directory search paths!" "ERROR"
+                                                }
+                                            }
+                                        }
+                                    } catch {
+                                        Write-Log "[NOK] Failed to configure home directory search paths: $($_.Exception.Message)" "ERROR"
+                                    }
+                                } else {
+                                    Write-Log "[WHATIF] Would configure home directory search paths: $($SearchPaths -join ', ')"
+                                }
+                            } else {
+                                Write-Log "[WARNING] Home directory search paths array is empty" "WARNING"
+                            }
+                        } else {
+                            Write-Log "[WARNING] No home directory search paths found in export - dynamic shares may not work properly" "WARNING"
+                        }
+                        
+                    } catch {
+                        Write-Log "[WARNING] Failed to load CIFS server configuration: $($_.Exception.Message)" "WARNING"
+                    }
+                } else {
+                    Write-Log "[INFO] No CIFS server configuration file found - this may be from an older export" "INFO"
+                }
                 
                 # Derive required junction paths and mount volumes
                 $RequiredJunctions = @{}
@@ -961,7 +1040,15 @@ try {
                     # Special handling for dynamic shares
                     if ($ShareType -eq "dynamic") {
                         Write-Log "[INFO] Dynamic share detected: $ShareName - path contains user variables" "INFO"
+                        Write-Log "[INFO] Original dynamic path: '$($Share.Path)'" "INFO"
                         Write-Log "[INFO] Configuring as home directory share to enable user variable substitution" "INFO"
+                        
+                        # Validate dynamic path format
+                        if ($Share.Path -match '%[wdWD]') {
+                            Write-Log "[INFO] Dynamic path validation passed - contains valid user variables" "INFO"
+                        } else {
+                            Write-Log "[WARNING] Dynamic path validation failed - no user variables found in: $($Share.Path)" "WARNING"
+                        }
                     }
                     
                     if (!$WhatIf) {
@@ -980,6 +1067,12 @@ try {
                                 Name = $ShareName
                                 Path = $Share.Path
                             }
+                            
+                            # Debug: Show exact parameters being used for share creation
+                            Write-Log "[DEBUG] Share creation parameters:" "DEBUG"
+                            Write-Log "[DEBUG]   Name: '$($ShareParams.Name)'" "DEBUG"
+                            Write-Log "[DEBUG]   Path: '$($ShareParams.Path)'" "DEBUG"
+                            Write-Log "[DEBUG]   ShareType: $ShareType" "DEBUG"
                             
                             # Add basic parameters that are supported
                             if ($Share.Comment) { $ShareParams.Comment = $Share.Comment }
@@ -1036,6 +1129,40 @@ try {
                             # Create the share with all properties set via individual parameters
                             Add-NcCifsShare @ShareParams
                             Write-Log "[OK] Successfully created CIFS $ShareType share: $ShareName with properties"
+                            
+                            # Verify the created share - especially path for dynamic shares
+                            try {
+                                $CreatedShare = Get-NcCifsShare -Controller $TargetController -VserverContext $TargetSVM -Name $ShareName
+                                if ($CreatedShare) {
+                                    Write-Log "[VERIFY] Created share details:" "INFO"
+                                    Write-Log "[VERIFY]   Name: '$($CreatedShare.ShareName)'" "INFO"
+                                    Write-Log "[VERIFY]   Path: '$($CreatedShare.Path)'" "INFO"
+                                    Write-Log "[VERIFY]   Properties: '$($CreatedShare.ShareProperties -join ', ')'" "INFO"
+                                    
+                                    # Special verification for dynamic shares
+                                    if ($ShareType -eq "dynamic") {
+                                        if ($CreatedShare.Path -eq $Share.Path) {
+                                            Write-Log "[OK] Dynamic share path verification passed - path preserved correctly" "SUCCESS"
+                                        } else {
+                                            Write-Log "[NOK] Dynamic share path verification failed!" "ERROR"
+                                            Write-Log "[NOK]   Expected: '$($Share.Path)'" "ERROR"
+                                            Write-Log "[NOK]   Actual: '$($CreatedShare.Path)'" "ERROR"
+                                        }
+                                        
+                                        # Check if homedirectory property is set
+                                        if ($CreatedShare.ShareProperties -contains "homedirectory") {
+                                            Write-Log "[OK] HomeDirectory property verification passed" "SUCCESS"
+                                        } else {
+                                            Write-Log "[NOK] HomeDirectory property missing from dynamic share!" "ERROR"
+                                            Write-Log "[NOK] This may cause user variable substitution to fail" "ERROR"
+                                        }
+                                    }
+                                } else {
+                                    Write-Log "[WARNING] Could not retrieve created share for verification" "WARNING"
+                                }
+                            } catch {
+                                Write-Log "[WARNING] Share verification failed: $($_.Exception.Message)" "WARNING"
+                            }
                             
                             # Handle SymlinkProperties and VscanProfile via ZAPI if they exist (these are not supported as individual parameters)
                             if (($Share.SymlinkProperties -and $Share.SymlinkProperties.Count -gt 0) -or ($Share.VscanProfile -and $Share.VscanProfile.Count -gt 0)) {
