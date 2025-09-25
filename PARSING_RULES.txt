@@ -1,3 +1,12 @@
 CRITICAL PowerShell Rule: NEVER use $variable immediately followed by : in PowerShell scripts. This causes parsing errors because PowerShell treats it as drive/scope syntax. Always use ${variable} instead when followed by a colon.
 PowerShell Rule: When using [CmdletBinding()], do NOT define duplicate common parameters like -Debug, -Verbose, -WhatIf, etc. Use the built-in $DebugPreference, $VerbosePreference, and $WhatIfPreference variables instead.
 NetApp PowerShell Rule: To mount volumes at a junction path, use Mount-NcVol -JunctionPath, NOT Set-NcVol -JunctionPath (which doesn't exist)
+
+# NetApp PowerShell Cmdlet Parameter Rules
+NetApp Rule: Set-NcNetInterface uses -Vserver parameter, NOT -VserverContext (LIF management cmdlet)
+NetApp Rule: Remove-NcCifsShareAcl uses -Vserver parameter, NOT -VserverContext (ACL management cmdlet)
+NetApp Rule: Most Get-Nc* cmdlets (Get-NcNetInterface, Get-NcCifsShare, etc.) use -VserverContext parameter
+NetApp Rule: Most Add-Nc* cmdlets (Add-NcCifsShare, Add-NcCifsShareAcl, etc.) use -VserverContext parameter
+NetApp Rule: show_previous_versions ShareProperty maps to 'showsnapshot' in ZAPI
+NetApp Rule: Dynamic shares with %w variables may need special path handling
+NetApp Rule: ZAPI calls with Invoke-NcSystemApi return results even on success (check for non-null, not just truthy)

@@ -224,15 +224,18 @@ function Set-ZapiCifsShareProperties {
 "@
         
         Write-Log "[ZAPI] Setting advanced properties for share '$ShareName': $($Properties -join ', ')"
+        Write-Log "[DEBUG] ZAPI XML: $zapiXml" "DEBUG"
         
         # Execute ZAPI call
         $result = Invoke-NcSystemApi -Controller $Controller -Request $zapiXml
         
-        if ($result) {
+        # Check if result indicates success (ZAPI returns result even on success)
+        if ($result -ne $null) {
             Write-Log "[OK] Successfully set advanced properties for share '$ShareName' via ZAPI"
+            Write-Log "[DEBUG] ZAPI Result: $($result | Out-String)" "DEBUG"
             return $true
         } else {
-            Write-Log "[NOK] ZAPI call returned no result for share '$ShareName'" "WARNING"
+            Write-Log "[NOK] ZAPI call returned null for share '$ShareName'" "WARNING"
             return $false
         }
         
@@ -271,6 +274,7 @@ function Convert-SharePropertiesToZapi {
                 "branchcache" { $zapiProperties += "branchcache" }
                 "access_based_enumeration" { $zapiProperties += "access_based_enumeration" }
                 "shadowcopy" { $zapiProperties += "shadowcopy" }
+                "show_previous_versions" { $zapiProperties += "showsnapshot" }
                 default { 
                     Write-Log "[INFO] Unknown ShareProperty '$prop' - attempting to use as-is" "WARNING"
                     $zapiProperties += $prop.ToLower()
@@ -953,6 +957,11 @@ try {
                     
                     Write-Log "Creating exported CIFS $ShareType share: $ShareName at path: $($Share.Path)"
                     
+                    # Special handling for dynamic shares
+                    if ($ShareType -eq "dynamic") {
+                        Write-Log "[INFO] Dynamic share detected: $ShareName - path contains user variables" "INFO"
+                    }
+                    
                     if (!$WhatIf) {
                         try {
                             # Check if share already exists (idempotency)
@@ -1012,7 +1021,7 @@ try {
                             
                             # Remove default Everyone permission
                             try {
-                                Remove-NcCifsShareAcl -Controller $TargetController -VserverContext $TargetSVM -Share $ShareName -UserOrGroup "Everyone" -ErrorAction SilentlyContinue
+                                Remove-NcCifsShareAcl -Controller $TargetController -Vserver $TargetSVM -Share $ShareName -UserOrGroup "Everyone" -ErrorAction SilentlyContinue
                                 Write-Log "[OK] Removed default Everyone permission for: $ShareName"
                             } catch {
                                 Write-Log "[NOK] Could not remove Everyone permission for $ShareName" "WARNING"
@@ -1070,10 +1079,9 @@ try {
         Write-Log "[INFO] No export path specified - skipping CIFS share processing"
     }
     
-    # Continue prompt after share and ACL creation
-    if ($ExportPath -and (Test-Path $ExportPath)) {
-        Confirm-Continue "CIFS Share and ACL Creation" "Completed volume mounting and CIFS share/ACL creation from exported configuration"
-    }
+    # Continue prompt after share and ACL creation (always runs if we processed shares)
+    $SharesProcessed = if ($ExportPath -and (Test-Path $ExportPath)) { "from exported configuration" } else { "(no export path specified)" }
+    Confirm-Continue "CIFS Share and ACL Creation" "Completed volume mounting and CIFS share/ACL creation $SharesProcessed"
 
     # Step 16: Take source LIFs administratively down
     Write-Log "Taking source LIFs administratively down..."
@@ -1084,7 +1092,7 @@ try {
             if (!$WhatIf) {
                 try {
                     Write-Log "Setting source LIF '$($SourceLIF.Name)' administratively down..."
-                    Set-NcNetInterface -Controller $SourceController -VserverContext $SourceSVM -Name $SourceLIF.Name -AdministrativeStatus down
+                    Set-NcNetInterface -Controller $SourceController -Vserver $SourceSVM -Name $SourceLIF.Name -AdministrativeStatus down
                     Write-Log "[OK] Source LIF '$($SourceLIF.Name)' set to administratively down"
                 } catch {
                     Write-Log "[NOK] Failed to set source LIF '$($SourceLIF.Name)' down: $($_.Exception.Message)" "ERROR"
@@ -1111,7 +1119,7 @@ try {
             try {
                 # First, take target LIF down
                 Write-Log "Setting target LIF '$($TargetLIF.Name)' administratively down..."
-                Set-NcNetInterface -Controller $TargetController -VserverContext $TargetSVM -Name $TargetLIF.Name -AdministrativeStatus down
+                Set-NcNetInterface -Controller $TargetController -Vserver $TargetSVM -Name $TargetLIF.Name -AdministrativeStatus down
                 
                 # Wait a moment for the change to take effect
                 Start-Sleep -Seconds 3
@@ -1123,7 +1131,7 @@ try {
                 } else {
                     # Update the IP address and netmask
                     Write-Log "Updating IP address and netmask for target LIF '$($TargetLIF.Name)'..."
-                    Set-NcNetInterface -Controller $TargetController -VserverContext $TargetSVM -Name $TargetLIF.Name -Address $SourceLIF.IPAddress -Netmask $SourceLIF.Netmask
+                    Set-NcNetInterface -Controller $TargetController -Vserver $TargetSVM -Name $TargetLIF.Name -Address $SourceLIF.IPAddress -Netmask $SourceLIF.Netmask
                 }
                 
                 # Wait a moment for the IP change to take effect
@@ -1131,7 +1139,7 @@ try {
                 
                 # Bring target LIF back up
                 Write-Log "Bringing target LIF '$($TargetLIF.Name)' administratively up..."
-                Set-NcNetInterface -Controller $TargetController -VserverContext $TargetSVM -Name $TargetLIF.Name -AdministrativeStatus up
+                Set-NcNetInterface -Controller $TargetController -Vserver $TargetSVM -Name $TargetLIF.Name -AdministrativeStatus up
                 
                 Write-Log "[OK] Successfully migrated IP to target LIF '$($TargetLIF.Name)'"
                 
@@ -1146,7 +1154,7 @@ try {
                 # Attempt to bring the LIF back up even if IP change failed
                 try {
                     Write-Log "Attempting to bring target LIF '$($TargetLIF.Name)' back up after error..."
-                    Set-NcNetInterface -Controller $TargetController -VserverContext $TargetSVM -Name $TargetLIF.Name -AdministrativeStatus up
+                    Set-NcNetInterface -Controller $TargetController -Vserver $TargetSVM -Name $TargetLIF.Name -AdministrativeStatus up
                 } catch {
                     Write-Log "[NOK] Failed to bring target LIF '$($TargetLIF.Name)' back up: $($_.Exception.Message)" "ERROR"
                 }
