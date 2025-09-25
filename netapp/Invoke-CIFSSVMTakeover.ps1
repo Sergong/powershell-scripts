@@ -929,7 +929,7 @@ try {
                                     Write-Log "[OK] Volume '$VolumeName' already mounted at: $($Volume.JunctionPath)"
                                 } else {
                                     Write-Log "Mounting volume '$VolumeName' at junction: $JunctionPath"
-                                    Set-NcVol -Controller $TargetController -VserverContext $TargetSVM -Name $VolumeName -JunctionPath $JunctionPath
+                                    Mount-NcVol -Controller $TargetController -VserverContext $TargetSVM -Name $VolumeName -JunctionPath $JunctionPath
                                     Write-Log "[OK] Successfully mounted volume '$VolumeName' at: $JunctionPath"
                                 }
                             } else {
