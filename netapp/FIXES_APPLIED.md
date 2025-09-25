@@ -130,3 +130,32 @@ The key requirement is setting the `homedirectory` ShareProperty to enable user 
 - **User Variables**: Full support for `%w`, `%d`, `%u` substitution
 
 All fixes maintain backward compatibility and significantly enhance the script's reliability and functionality.
+
+## Current Status
+
+### ✅ ShareProperties Issue Resolved for ONTAP Toolkit 9.17
+The error "ShareProperties parameter specified, which is not supported for REST call" has been fixed by using **individual property parameters** instead of the `-ShareProperties` array:
+
+1. **Using individual parameters** - `-HomeDirectory $True`, `-Browsable $True`, `-Oplocks $True`, etc.
+2. **Automatic property mapping** - script automatically maps ShareProperties to individual parameters
+3. **Dynamic share support** - automatically sets `-HomeDirectory $True` for shares with `%w`, `%d`, `%u` variables
+4. **Fallback compatibility** - falls back to `-ShareProperties` array if individual parameters aren't supported
+
+### 🧪 Test Scripts Available
+Two test scripts are now available:
+
+**`Test-ShareCreation-9.17.ps1`** - For ONTAP Toolkit 9.17:
+- Tests individual property parameters (`-HomeDirectory $True`, etc.)
+- Verifies which parameters are supported in your toolkit version
+- Tests dynamic share creation with proper HomeDirectory setting
+- Shows fallback to ShareProperties array if individual parameters fail
+
+**`Test-ShareCreation.ps1`** - For older toolkit versions:
+- Tests basic share creation without ShareProperties parameter
+- Tests ZAPI property setting functionality
+- Confirms compatibility with older toolkit versions
+
+### 📋 Next Steps
+1. **Re-run the main script** - `Invoke-CIFSSVMTakeover.ps1` should now work correctly
+2. **Test with the test script first** if you want to verify functionality on a smaller scale
+3. **Check the debug output** - the script now has enhanced logging to show what properties are being set

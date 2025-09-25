@@ -956,6 +956,7 @@ try {
                     $ShareType = if ($Share.Path -match '%[wdWD]') { "dynamic" } else { "static" }
                     
                     Write-Log "Creating exported CIFS $ShareType share: $ShareName at path: $($Share.Path)"
+                    Write-Log "[DEBUG] Share object properties - ShareProperties: $($Share.ShareProperties -join ','), SymlinkProperties: $($Share.SymlinkProperties -join ','), VscanProfile: $($Share.VscanProfile -join ',')" "DEBUG"
                     
                     # Special handling for dynamic shares
                     if ($ShareType -eq "dynamic") {
@@ -972,7 +973,7 @@ try {
                                 continue
                             }
 
-                            # Build share parameters (REST-compatible only)
+                            # Build share parameters for ONTAP Toolkit 9.17
                             $ShareParams = @{
                                 Controller = $TargetController
                                 VserverContext = $TargetSVM
@@ -980,17 +981,18 @@ try {
                                 Path = $Share.Path
                             }
                             
-                            # Add basic parameters that are REST API compatible
+                            # Add basic parameters that are supported
                             if ($Share.Comment) { $ShareParams.Comment = $Share.Comment }
                             if ($Share.FileUmask) { $ShareParams.FileUmask = $Share.FileUmask }
                             if ($Share.DirUmask) { $ShareParams.DirUmask = $Share.DirUmask }
                             if ($Share.OfflineFilesMode) { $ShareParams.OfflineFilesMode = $Share.OfflineFilesMode }
                             if ($Share.AttributeCacheTtl) { $ShareParams.AttributeCacheTtl = $Share.AttributeCacheTtl }
                             
-                            # Handle ShareProperties - ensure dynamic shares have homedirectory property
+                            # Handle ShareProperties using individual property parameters (ONTAP Toolkit 9.17)
                             $SharePropertiesToSet = @()
-                            if ($Share.ShareProperties) {
+                            if ($Share.ShareProperties -and $Share.ShareProperties.Count -gt 0) {
                                 $SharePropertiesToSet += $Share.ShareProperties
+                                Write-Log "[DEBUG] Existing ShareProperties found: $($Share.ShareProperties -join ', ')" "DEBUG"
                             }
                             
                             # For dynamic shares, ensure homedirectory property is set for user variable substitution
@@ -999,23 +1001,48 @@ try {
                                 Write-Log "[INFO] Added 'homedirectory' property for dynamic share: $ShareName" "INFO"
                             }
                             
-                            # Add ShareProperties if we have any
-                            if ($SharePropertiesToSet.Count -gt 0) {
-                                $ShareParams.ShareProperties = $SharePropertiesToSet
-                                Write-Log "[INFO] Setting ShareProperties: $($SharePropertiesToSet -join ', ') for share: $ShareName" "INFO"
+                            # Map ShareProperties to individual parameters for ONTAP Toolkit 9.17
+                            foreach ($Property in $SharePropertiesToSet) {
+                                switch ($Property.ToLower()) {
+                                    "homedirectory" { $ShareParams.HomeDirectory = $true }
+                                    "browsable" { $ShareParams.Browsable = $true }
+                                    "oplocks" { $ShareParams.Oplocks = $true }
+                                    "changenotify" { $ShareParams.ChangeNotify = $true }
+                                    "showsnapshot" { $ShareParams.ShowSnapshot = $true }
+                                    "attributecache" { $ShareParams.AttributeCache = $true }
+                                    "continuously_available" { $ShareParams.ContinuouslyAvailable = $true }
+                                    "access_based_enumeration" { $ShareParams.AccessBasedEnumeration = $true }
+                                    "branchcache" { $ShareParams.BranchCache = $true }
+                                    "encrypt_data" { $ShareParams.EncryptData = $true }
+                                    default {
+                                        Write-Log "[WARNING] Unknown ShareProperty '$Property' - will attempt via ShareProperties array" "WARNING"
+                                    }
+                                }
                             }
                             
-                            # Create the basic share first
-                            Add-NcCifsShare @ShareParams
-                            Write-Log "[OK] Successfully created CIFS $ShareType share: $ShareName"
+                            # If we have properties that need to be set via ShareProperties array, add them
+                            if ($SharePropertiesToSet.Count -gt 0) {
+                                # Try individual parameters first, fall back to ShareProperties array if needed
+                                try {
+                                    # Don't add ShareProperties parameter - use individual parameters instead
+                                    Write-Log "[INFO] Setting share properties via individual parameters: $($SharePropertiesToSet -join ', ')" "INFO"
+                                } catch {
+                                    # Fallback: use ShareProperties array if individual parameters fail
+                                    Write-Log "[WARNING] Individual parameters failed, trying ShareProperties array" "WARNING"
+                                    $ShareParams.ShareProperties = $SharePropertiesToSet
+                                }
+                            }
                             
-                            # Configure advanced properties via ZAPI if needed (for properties not handled by REST API)
-                            $AdvancedPropsSet = $false
-                            if ($Share.SymlinkProperties -or $Share.VscanProfile) {
-                                Write-Log "[INFO] Configuring advanced properties (SymlinkProperties, VscanProfile) for share: $ShareName"
+                            # Create the share with all properties set via individual parameters
+                            Add-NcCifsShare @ShareParams
+                            Write-Log "[OK] Successfully created CIFS $ShareType share: $ShareName with properties"
+                            
+                            # Handle SymlinkProperties and VscanProfile via ZAPI if they exist (these are not supported as individual parameters)
+                            if (($Share.SymlinkProperties -and $Share.SymlinkProperties.Count -gt 0) -or ($Share.VscanProfile -and $Share.VscanProfile.Count -gt 0)) {
+                                Write-Log "[INFO] Configuring advanced properties (SymlinkProperties, VscanProfile) via ZAPI for share: $ShareName"
                                 
                                 try {
-                                    # Convert only non-REST properties to ZAPI format (exclude ShareProperties as they're handled above)
+                                    # Convert only non-parameter properties to ZAPI format
                                     $ZapiProperties = Convert-SharePropertiesToZapi -ShareProperties @() -SymlinkProperties $Share.SymlinkProperties -VscanProfile $Share.VscanProfile
                                     
                                     if ($ZapiProperties.Count -gt 0) {
@@ -1027,15 +1054,11 @@ try {
                                         } else {
                                             Write-Log "[NOK] Failed to configure some advanced properties for share: $ShareName" "WARNING"
                                         }
-                                    } else {
-                                        Write-Log "[INFO] No additional ZAPI-only properties needed for share: $ShareName" "INFO"
                                     }
                                     
                                 } catch {
                                     Write-Log "[NOK] Error configuring advanced properties for share ${ShareName}: $($_.Exception.Message)" "ERROR"
                                 }
-                            } else {
-                                Write-Log "[INFO] No advanced ZAPI properties (SymlinkProperties, VscanProfile) to configure for share: $ShareName" "INFO"
                             }
                             
                             $SharesCreated++
