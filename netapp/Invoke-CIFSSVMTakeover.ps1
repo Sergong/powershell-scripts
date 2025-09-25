@@ -211,16 +211,16 @@ function Set-ZapiCifsShareProperties {
     )
     
     try {
-        # Build ZAPI XML for cifs-share-properties-modify
+        # Build ZAPI XML for cifs-share-modify
         $propertyElements = $Properties | ForEach-Object { "<property>$_</property>" }
         $zapiXml = @"
-<cifs-share-properties-modify>
+<cifs-share-modify>
     <vserver>$VserverContext</vserver>
     <share-name>$ShareName</share-name>
     <share-properties>
         $($propertyElements -join '')
     </share-properties>
-</cifs-share-properties-modify>
+</cifs-share-modify>
 "@
         
         Write-Log "[ZAPI] Setting advanced properties for share '$ShareName': $($Properties -join ', ')"
@@ -960,6 +960,7 @@ try {
                     # Special handling for dynamic shares
                     if ($ShareType -eq "dynamic") {
                         Write-Log "[INFO] Dynamic share detected: $ShareName - path contains user variables" "INFO"
+                        Write-Log "[INFO] Configuring as home directory share to enable user variable substitution" "INFO"
                     }
                     
                     if (!$WhatIf) {
@@ -986,18 +987,36 @@ try {
                             if ($Share.OfflineFilesMode) { $ShareParams.OfflineFilesMode = $Share.OfflineFilesMode }
                             if ($Share.AttributeCacheTtl) { $ShareParams.AttributeCacheTtl = $Share.AttributeCacheTtl }
                             
+                            # Handle ShareProperties - ensure dynamic shares have homedirectory property
+                            $SharePropertiesToSet = @()
+                            if ($Share.ShareProperties) {
+                                $SharePropertiesToSet += $Share.ShareProperties
+                            }
+                            
+                            # For dynamic shares, ensure homedirectory property is set for user variable substitution
+                            if ($ShareType -eq "dynamic" -and "homedirectory" -notin $SharePropertiesToSet) {
+                                $SharePropertiesToSet += "homedirectory"
+                                Write-Log "[INFO] Added 'homedirectory' property for dynamic share: $ShareName" "INFO"
+                            }
+                            
+                            # Add ShareProperties if we have any
+                            if ($SharePropertiesToSet.Count -gt 0) {
+                                $ShareParams.ShareProperties = $SharePropertiesToSet
+                                Write-Log "[INFO] Setting ShareProperties: $($SharePropertiesToSet -join ', ') for share: $ShareName" "INFO"
+                            }
+                            
                             # Create the basic share first
                             Add-NcCifsShare @ShareParams
                             Write-Log "[OK] Successfully created CIFS $ShareType share: $ShareName"
                             
-                            # Configure advanced properties via ZAPI if needed
+                            # Configure advanced properties via ZAPI if needed (for properties not handled by REST API)
                             $AdvancedPropsSet = $false
-                            if ($Share.ShareProperties -or $Share.SymlinkProperties -or $Share.VscanProfile) {
-                                Write-Log "[INFO] Configuring advanced properties for share: $ShareName"
+                            if ($Share.SymlinkProperties -or $Share.VscanProfile) {
+                                Write-Log "[INFO] Configuring advanced properties (SymlinkProperties, VscanProfile) for share: $ShareName"
                                 
                                 try {
-                                    # Convert exported properties to ZAPI format
-                                    $ZapiProperties = Convert-SharePropertiesToZapi -ShareProperties $Share.ShareProperties -SymlinkProperties $Share.SymlinkProperties -VscanProfile $Share.VscanProfile
+                                    # Convert only non-REST properties to ZAPI format (exclude ShareProperties as they're handled above)
+                                    $ZapiProperties = Convert-SharePropertiesToZapi -ShareProperties @() -SymlinkProperties $Share.SymlinkProperties -VscanProfile $Share.VscanProfile
                                     
                                     if ($ZapiProperties.Count -gt 0) {
                                         # Set advanced properties via ZAPI
@@ -1009,12 +1028,14 @@ try {
                                             Write-Log "[NOK] Failed to configure some advanced properties for share: $ShareName" "WARNING"
                                         }
                                     } else {
-                                        Write-Log "[INFO] No mappable advanced properties found for share: $ShareName" "INFO"
+                                        Write-Log "[INFO] No additional ZAPI-only properties needed for share: $ShareName" "INFO"
                                     }
                                     
                                 } catch {
                                     Write-Log "[NOK] Error configuring advanced properties for share ${ShareName}: $($_.Exception.Message)" "ERROR"
                                 }
+                            } else {
+                                Write-Log "[INFO] No advanced ZAPI properties (SymlinkProperties, VscanProfile) to configure for share: $ShareName" "INFO"
                             }
                             
                             $SharesCreated++
@@ -1082,6 +1103,9 @@ try {
     # Continue prompt after share and ACL creation (always runs if we processed shares)
     $SharesProcessed = if ($ExportPath -and (Test-Path $ExportPath)) { "from exported configuration" } else { "(no export path specified)" }
     Confirm-Continue "CIFS Share and ACL Creation" "Completed volume mounting and CIFS share/ACL creation $SharesProcessed"
+
+    # Critical prompt before LIF migration - this is the point of no return for IP changes
+    Confirm-Continue "Pre-LIF Migration" "About to start LIF IP migration - this will change network configuration on both clusters"
 
     # Step 16: Take source LIFs administratively down
     Write-Log "Taking source LIFs administratively down..."
