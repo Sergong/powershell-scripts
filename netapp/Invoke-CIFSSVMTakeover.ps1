@@ -51,9 +51,6 @@
     Path to the CIFS export directory for volume validation (optional)
     If specified, will validate discovered volumes against exported share data
     
-.PARAMETER ContinuePrompts
-    Prompt user for confirmation after each major operation (except in WhatIf mode)
-    Allows for verification of changes and early exit if issues are detected
 #>
 
 param(
@@ -96,8 +93,6 @@ param(
     [Parameter(Mandatory=$false)]
     [string]$ExportPath,
     
-    [Parameter(Mandatory=$false)]
-    [switch]$ContinuePrompts
 )
 
 # Import NetApp PowerShell Toolkit
@@ -159,35 +154,33 @@ function Confirm-Continue {
         return $true
     }
     
-    if ($ContinuePrompts) {
-        Write-Host "`n" -ForegroundColor Yellow
-        Write-Host "=== CONTINUE PROMPT ===" -ForegroundColor Yellow
-        Write-Host "Operation completed: $Operation" -ForegroundColor White
-        if ($Details) {
-            Write-Host "Details: $Details" -ForegroundColor Gray
+    Write-Host "`n" -ForegroundColor Yellow
+    Write-Host "=== CONTINUE PROMPT ===" -ForegroundColor Yellow
+    Write-Host "Operation completed: $Operation" -ForegroundColor White
+    if ($Details) {
+        Write-Host "Details: $Details" -ForegroundColor Gray
+    }
+    Write-Host "Review the above output for any errors or unexpected results." -ForegroundColor Yellow
+    
+    $Response = ""
+    while ($Response -notin @("Y", "y", "N", "n", "Q", "q")) {
+        $Response = Read-Host "Continue with next operation? (Y/N/Q to quit)"
+    }
+    
+    switch ($Response.ToUpper()) {
+        "Y" { 
+            Write-Log "User chose to continue after: $Operation"
+            return $true 
         }
-        Write-Host "Review the above output for any errors or unexpected results." -ForegroundColor Yellow
-        
-        $Response = ""
-        while ($Response -notin @("Y", "y", "N", "n", "Q", "q")) {
-            $Response = Read-Host "Continue with next operation? (Y/N/Q to quit)"
+        "N" { 
+            Write-Log "User chose to stop after: $Operation"
+            Write-Host "Operation stopped by user choice." -ForegroundColor Yellow
+            exit 0
         }
-        
-        switch ($Response.ToUpper()) {
-            "Y" { 
-                Write-Log "User chose to continue after: $Operation"
-                return $true 
-            }
-            "N" { 
-                Write-Log "User chose to stop after: $Operation"
-                Write-Host "Operation stopped by user choice." -ForegroundColor Yellow
-                exit 0
-            }
-            "Q" { 
-                Write-Log "User chose to quit after: $Operation"
-                Write-Host "Operation aborted by user." -ForegroundColor Red
-                exit 1
-            }
+        "Q" { 
+            Write-Log "User chose to quit after: $Operation"
+            Write-Host "Operation aborted by user." -ForegroundColor Red
+            exit 1
         }
     }
     
@@ -309,11 +302,7 @@ if ($SourceLIFNames -and $TargetLIFNames) {
     Write-Log "LIF Migration: Will auto-discover CIFS LIFs"
 }
 
-if ($ContinuePrompts) {
-    Write-Log "Continue Prompts: Enabled (will pause after each major operation)"
-} else {
-    Write-Log "Continue Prompts: Disabled (running in unattended mode)"
-}
+Write-Log "Continue Prompts: Enabled (will pause after each major operation)"
 
 if ($SnapMirrorVolumes -and $SnapMirrorVolumes.Count -gt 0) {
     Write-Log "SnapMirror Volumes (specified): $($SnapMirrorVolumes -join ', ')"
@@ -710,6 +699,9 @@ try {
     } catch {
         Write-Log "[NOK] Could not check CIFS sessions: $($_.Exception.Message)" "WARNING"
     }
+    
+    # Continue prompt after CIFS session check
+    Confirm-Continue "CIFS Session Check" "Completed check for active CIFS sessions on source SVM"
 
     # Step 12: Disable CIFS server on source SVM
     Write-Log "Disabling CIFS server on source SVM..."
@@ -796,6 +788,9 @@ try {
         }
         
         Write-Log "[OK] Final SnapMirror update operations completed"
+        
+        # Continue prompt after final SnapMirror updates
+        Confirm-Continue "Final SnapMirror Updates" "Completed final SnapMirror updates before breaking relationships"
     }
     
     # Step 14: Break SnapMirror relationships (if specified)
@@ -881,6 +876,9 @@ try {
     
     # Step 15: Mount volumes and create exported CIFS shares and ACLs (after SnapMirror break)
     if ($ExportPath -and (Test-Path $ExportPath)) {
+        # Continue prompt before share/volume processing
+        Confirm-Continue "Pre-Share Processing" "About to start volume mounting and CIFS share/ACL creation"
+        
         Write-Log "Processing exported CIFS shares and volume mounting..."
         
         # Load exported shares, ACLs, and CIFS server configuration
@@ -1025,6 +1023,9 @@ try {
                         Write-Log "[WHATIF] Would mount volume '$VolumeName' at junction: $JunctionPath"
                     }
                 }
+                
+                # Continue prompt after volume mounting
+                Confirm-Continue "Volume Mounting" "Completed volume mounting operations"
                 
                 # Create CIFS shares from export
                 Write-Log "Creating exported CIFS shares..."
@@ -1238,6 +1239,9 @@ try {
                 Write-Log "[OK] Exported CIFS configuration applied - Shares: $SharesCreated, ACLs: $ACLsCreated" "SUCCESS"
                 Write-Log "[INFO] Advanced share properties (ShareProperties, SymlinkProperties, VscanProfile) configured via ZAPI where applicable" "INFO"
                 
+                # Continue prompt after share and ACL creation
+                Confirm-Continue "Share and ACL Creation" "Completed creation of CIFS shares and ACLs from export"
+                
             } catch {
                 Write-Log "[NOK] Failed to process exported CIFS configuration: $($_.Exception.Message)" "ERROR"
             }
@@ -1248,11 +1252,10 @@ try {
         
     } else {
         Write-Log "[INFO] No export path specified - skipping CIFS share processing"
+        
+        # Continue prompt when no export path specified
+        Confirm-Continue "Skip Share Processing" "No export path specified - skipped CIFS share processing"
     }
-    
-    # Continue prompt after share and ACL creation (always runs if we processed shares)
-    $SharesProcessed = if ($ExportPath -and (Test-Path $ExportPath)) { "from exported configuration" } else { "(no export path specified)" }
-    Confirm-Continue "CIFS Share and ACL Creation" "Completed volume mounting and CIFS share/ACL creation $SharesProcessed"
 
     # Critical prompt before LIF migration - this is the point of no return for IP changes
     Confirm-Continue "Pre-LIF Migration" "About to start LIF IP migration - this will change network configuration on both clusters"
@@ -1278,6 +1281,9 @@ try {
             Write-Log "[OK] Source LIF '$($SourceLIF.Name)' is already administratively down (idempotent)"
         }
     }
+    
+    # Continue prompt after taking source LIFs down
+    Confirm-Continue "Source LIF Shutdown" "Completed taking source LIFs administratively down"
 
     # Step 17: Update target LIF IP addresses
     Write-Log "Updating target LIF IP addresses..."
