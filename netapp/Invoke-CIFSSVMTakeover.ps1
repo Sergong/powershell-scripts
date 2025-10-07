@@ -91,7 +91,7 @@ param(
     [switch]$SkipSnapMirrorBreak,
     
     [Parameter(Mandatory=$false)]
-    [string]$ExportPath,
+    [string]$ExportPath
     
 )
 
