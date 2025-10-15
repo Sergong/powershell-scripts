@@ -142,6 +142,7 @@ $Summary = @{
     FailedItems = @()
     BackupLocation = ""
     StartTime = $StartTime
+    IcaclsExecutionTime = $null
 }
 
 Write-Log "=== Share Administrator Permissions REMOVAL Script Started ===" "INFO"
@@ -236,6 +237,10 @@ try {
             # Execute icacls with simplified, reliable approach
             Write-Log "Executing: icacls $($IcaclsArgs -join ' ')" "INFO"
             
+            # Start timing the icacls operation
+            $IcaclsStartTime = Get-Date
+            Write-Log "icacls removal operation started at: $($IcaclsStartTime.ToString('yyyy-MM-dd HH:mm:ss'))" "INFO"
+            
             # Use Start-Process with simpler output handling to prevent deadlocks
             $ProcessArgs = @{
                 FilePath = "icacls"
@@ -260,6 +265,13 @@ try {
                 # Read output from temp files after process completes
                 $IcaclsOutput = if (Test-Path $TempOutputFile) { Get-Content $TempOutputFile -Raw } else { "" }
                 $IcaclsError = if (Test-Path $TempErrorFile) { Get-Content $TempErrorFile -Raw } else { "" }
+                
+                # Calculate and log icacls execution time
+                $IcaclsEndTime = Get-Date
+                $IcaclsExecutionTime = $IcaclsEndTime - $IcaclsStartTime
+                $Summary.IcaclsExecutionTime = $IcaclsExecutionTime
+                Write-Log "icacls removal operation completed at: $($IcaclsEndTime.ToString('yyyy-MM-dd HH:mm:ss'))" "INFO"
+                Write-Log "icacls removal execution time: $($IcaclsExecutionTime.ToString('hh\:mm\:ss\.fff'))" "SUCCESS"
                 
                 # Process results
                 if ($ExitCode -eq 0) {
@@ -293,6 +305,9 @@ try {
                     }
                     
                 } else {
+                    # Log timing even for failed operations
+                    Write-Log "icacls removal execution time: $($IcaclsExecutionTime.ToString('hh\:mm\:ss\.fff')) (FAILED)" "ERROR"
+                    
                     $ErrorMessage = "icacls removal command failed with exit code: ${ExitCode}"
                     if ($IcaclsError -and $IcaclsError.Trim() -ne "") {
                         $ErrorMessage += ". Error: $($IcaclsError.Trim())"
@@ -323,7 +338,10 @@ try {
     
     Write-Log " " "INFO"
     Write-Log "=== EXECUTION SUMMARY ===" "INFO"
-    Write-Log "Execution Time: $($ExecutionTime.ToString('hh\:mm\:ss'))" "INFO"
+    Write-Log "Total Script Execution Time: $($ExecutionTime.ToString('hh\:mm\:ss'))" "INFO"
+    if ($Summary.IcaclsExecutionTime) {
+        Write-Log "icacls Removal Command Execution Time: $($Summary.IcaclsExecutionTime.ToString('hh\:mm\:ss\.fff'))" "SUCCESS"
+    }
     Write-Log "SharePath: ${SharePath}" "INFO"
     Write-Log "Operation: REMOVED BUILTIN\Administrators permissions" "WARNING"
     
