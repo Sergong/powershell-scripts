@@ -206,30 +206,15 @@ try {
                     "/c"
                 )
                 
-                # Use Start-Process for better error handling and output capture
-                $ProcessInfo = New-Object System.Diagnostics.ProcessStartInfo
-                $ProcessInfo.FileName = "icacls"
-                $ProcessInfo.Arguments = $BackupArgs -join " "
-                $ProcessInfo.UseShellExecute = $false
-                $ProcessInfo.RedirectStandardOutput = $true
-                $ProcessInfo.RedirectStandardError = $true
-                $ProcessInfo.CreateNoWindow = $true
+                # Use simplified Start-Process approach
+                Write-Log "Creating ACL backup - this may take a moment..." "INFO"
                 
-                $Process = New-Object System.Diagnostics.Process
-                $Process.StartInfo = $ProcessInfo
-                $Process.Start() | Out-Null
-                $BackupOutput = $Process.StandardOutput.ReadToEnd()
-                $BackupError = $Process.StandardError.ReadToEnd()
-                $Process.WaitForExit()
+                $BackupProcess = Start-Process -FilePath "icacls" -ArgumentList $BackupArgs -Wait -NoNewWindow -PassThru
                 
-                if ($Process.ExitCode -eq 0) {
+                if ($BackupProcess.ExitCode -eq 0) {
                     Write-Log "Permissions backup created successfully: ${BackupFile}" "SUCCESS"
-                    if ($BackupOutput) {
-                        Write-Log "Backup output: $BackupOutput" "INFO"
-                    }
                 } else {
-                    $ErrorMessage = if ($BackupError) { $BackupError } else { "Exit code: $($Process.ExitCode)" }
-                    Write-Log "Permission backup failed but continuing: $ErrorMessage" "WARNING"
+                    Write-Log "Permission backup failed (exit code: $($BackupProcess.ExitCode)) but continuing" "WARNING"
                 }
             } catch {
                 Write-Log "Permission backup failed but continuing: $($_.Exception.Message)" "WARNING"
@@ -265,89 +250,78 @@ try {
         Write-Log "This may take a while for large directory structures..." "INFO"
         
         try {
-            # Execute icacls with proper PowerShell error handling
+            # Execute icacls with simplified, reliable approach
             Write-Log "Executing: icacls $($IcaclsArgs -join ' ')" "INFO"
+            Write-Log "This operation may take several minutes for large directory structures..." "INFO"
             
-            # Use Start-Process for reliable cross-platform execution and output capture
-            $ProcessInfo = New-Object System.Diagnostics.ProcessStartInfo
-            $ProcessInfo.FileName = "icacls"
-            $ProcessInfo.Arguments = $IcaclsArgs -join " "
-            $ProcessInfo.UseShellExecute = $false
-            $ProcessInfo.RedirectStandardOutput = $true
-            $ProcessInfo.RedirectStandardError = $true
-            $ProcessInfo.CreateNoWindow = $true
-            
-            $Process = New-Object System.Diagnostics.Process
-            $Process.StartInfo = $ProcessInfo
-            $Process.Start() | Out-Null
-            
-            # Read output while process is running to avoid deadlocks
-            $OutputBuilder = New-Object System.Text.StringBuilder
-            $ErrorBuilder = New-Object System.Text.StringBuilder
-            
-            # Create async readers for stdout and stderr
-            $OutputReader = $Process.StandardOutput
-            $ErrorReader = $Process.StandardError
-            
-            # Read all output
-            while (!$Process.HasExited -or !$OutputReader.EndOfStream -or !$ErrorReader.EndOfStream) {
-                if (!$OutputReader.EndOfStream) {
-                    $Line = $OutputReader.ReadLine()
-                    if ($Line -ne $null) {
-                        [void]$OutputBuilder.AppendLine($Line)
-                    }
-                }
-                if (!$ErrorReader.EndOfStream) {
-                    $ErrorLine = $ErrorReader.ReadLine()
-                    if ($ErrorLine -ne $null) {
-                        [void]$ErrorBuilder.AppendLine($ErrorLine)
-                    }
-                }
-                Start-Sleep -Milliseconds 50
+            # Use Start-Process with simpler output handling to prevent deadlocks
+            $ProcessArgs = @{
+                FilePath = "icacls"
+                ArgumentList = $IcaclsArgs
+                Wait = $true
+                NoNewWindow = $true
+                PassThru = $true
             }
             
-            $Process.WaitForExit()
-            $IcaclsOutput = $OutputBuilder.ToString()
-            $IcaclsError = $ErrorBuilder.ToString()
-            $ExitCode = $Process.ExitCode
+            # Add output redirection only if we need to capture it
+            $TempOutputFile = [System.IO.Path]::GetTempFileName()
+            $TempErrorFile = [System.IO.Path]::GetTempFileName()
             
-            # Process results
-            if ($ExitCode -eq 0) {
-                Write-Log "icacls command completed successfully" "SUCCESS"
+            try {
+                # Execute icacls with output redirection to temp files
+                $ProcessArgs.RedirectStandardOutput = $TempOutputFile
+                $ProcessArgs.RedirectStandardError = $TempErrorFile
                 
-                # Parse icacls output for statistics
-                $OutputLines = $IcaclsOutput -split "`n" | Where-Object { $_.Trim() -ne "" }
+                $Process = Start-Process @ProcessArgs
+                $ExitCode = $Process.ExitCode
                 
-                foreach ($Line in $OutputLines) {
-                    $Line = $Line.Trim()
-                    if ($Line -match "Successfully processed (\d+) files") {
-                        $Summary.TotalFilesProcessed = [int]$Matches[1]
-                        Write-Log "Files processed: $($Matches[1])" "INFO"
-                    } elseif ($Line -match "Successfully processed (\d+) directories") {
-                        $Summary.TotalFoldersProcessed = [int]$Matches[1]
-                        Write-Log "Directories processed: $($Matches[1])" "INFO"
-                    } elseif ($Line -match "Failed processing (\d+)") {
-                        $Summary.FailedOperations = [int]$Matches[1]
-                        Write-Log "Failed operations: $($Matches[1])" "WARNING"
+                # Read output from temp files after process completes
+                $IcaclsOutput = if (Test-Path $TempOutputFile) { Get-Content $TempOutputFile -Raw } else { "" }
+                $IcaclsError = if (Test-Path $TempErrorFile) { Get-Content $TempErrorFile -Raw } else { "" }
+                
+                # Process results
+                if ($ExitCode -eq 0) {
+                    Write-Log "icacls command completed successfully" "SUCCESS"
+                    
+                    # Parse icacls output for statistics if available
+                    if ($IcaclsOutput) {
+                        $OutputLines = $IcaclsOutput -split "`n" | Where-Object { $_.Trim() -ne "" }
+                        
+                        foreach ($Line in $OutputLines) {
+                            $Line = $Line.Trim()
+                            if ($Line -match "Successfully processed (\d+) files") {
+                                $Summary.TotalFilesProcessed = [int]$Matches[1]
+                                Write-Log "Files processed: $($Matches[1])" "INFO"
+                            } elseif ($Line -match "Successfully processed (\d+) directories") {
+                                $Summary.TotalFoldersProcessed = [int]$Matches[1]
+                                Write-Log "Directories processed: $($Matches[1])" "INFO"
+                            } elseif ($Line -match "Failed processing (\d+)") {
+                                $Summary.FailedOperations = [int]$Matches[1]
+                                Write-Log "Failed operations: $($Matches[1])" "WARNING"
+                            }
+                        }
+                        
+                        $Summary.SuccessfulOperations = $Summary.TotalFilesProcessed + $Summary.TotalFoldersProcessed
                     }
+                    
+                    if ($Summary.SuccessfulOperations -eq 0) {
+                        # If we couldn't parse statistics, assume operation was successful
+                        Write-Log "Permission operation completed (statistics not available from icacls output)" "INFO"
+                        $Summary.SuccessfulOperations = 1  # Mark as successful
+                    }
+                    
+                } else {
+                    $ErrorMessage = "icacls command failed with exit code: ${ExitCode}"
+                    if ($IcaclsError -and $IcaclsError.Trim() -ne "") {
+                        $ErrorMessage += ". Error: $($IcaclsError.Trim())"
+                    }
+                    throw $ErrorMessage
                 }
                 
-                $Summary.SuccessfulOperations = $Summary.TotalFilesProcessed + $Summary.TotalFoldersProcessed
-                
-                # Log any additional output
-                if ($IcaclsOutput -and $IcaclsOutput.Trim() -ne "") {
-                    Write-Log "icacls output: $($IcaclsOutput.Trim())" "INFO"
-                }
-                
-            } else {
-                $ErrorMessage = "icacls command failed with exit code: ${ExitCode}"
-                if ($IcaclsError -and $IcaclsError.Trim() -ne "") {
-                    $ErrorMessage += ". Error: $($IcaclsError.Trim())"
-                }
-                if ($IcaclsOutput -and $IcaclsOutput.Trim() -ne "") {
-                    $ErrorMessage += ". Output: $($IcaclsOutput.Trim())"
-                }
-                throw $ErrorMessage
+            } finally {
+                # Clean up temp files
+                if (Test-Path $TempOutputFile) { Remove-Item $TempOutputFile -Force -ErrorAction SilentlyContinue }
+                if (Test-Path $TempErrorFile) { Remove-Item $TempErrorFile -Force -ErrorAction SilentlyContinue }
             }
             
         } catch {
