@@ -1,20 +1,20 @@
 <#
 .SYNOPSIS
     Migrates VMs from source vSphere 7 environment to target vSphere 8 environment with NetApp ONTAP backing.
-    Includes automated guest OS IP configuration using Invoke-VMScript.
+    VMs retain their existing IP addresses during migration.
 
 .DESCRIPTION
     This script automates the migration of VMs from a source vSphere environment to a target vSphere environment.
     Both environments are backed by NetApp ONTAP clusters with NFS datastores. The script handles the complete
     migration workflow including VM discovery, power operations, SnapMirror operations, datastore mounting,
-    VM registration, network reconfiguration, automated guest OS IP configuration, and cleanup operations.
+    VM registration, backup tagging, and cleanup operations.
     
-    The script automatically configures IP settings within Windows and Linux guest operating systems using
-    Invoke-VMScript, eliminating the need for manual post-migration network configuration.
+    The script automatically discovers which datastore each VM is located on and uses the same datastore name
+    on the target environment. VMs retain their existing network configuration during migration.
 
 .PARAMETER CSVPath
     Path to the CSV file containing VM migration information.
-    Required columns: VMName, VMDatastore, TargetVLAN, TargetIP, TargetSNMask, TargetGW, TargetDNS1, TargetDNS2
+    Required columns: VMName
 
 .PARAMETER SourcevCenter
     FQDN or IP address of the source vCenter server.
@@ -34,12 +34,6 @@
 .PARAMETER BackupTier
     Name of the backup tier tag to apply to migrated VMs. Default is "Tier3".
 
-.PARAMETER GuestCredentials
-    PSCredential object for guest OS operations. If not provided, will be prompted.
-
-.PARAMETER SkipGuestIPConfig
-    Skip automated guest OS IP configuration. Default is $false.
-
 .PARAMETER WhatIf
     Shows what would be done without making any changes.
 
@@ -49,23 +43,18 @@
 .EXAMPLE
     .\Invoke-VMigration.ps1 -CSVPath "VMs.csv" -SourcevCenter "source-vc.domain.com" -TargetvCenter "target-vc.domain.com" -TargetONTAPCluster "target-ontap.domain.com" -TargetNFSSVM "migration_svm"
 
-.EXAMPLE
-    .\Invoke-VMigration.ps1 -CSVPath "VMs.csv" -SourcevCenter "source-vc.domain.com" -TargetvCenter "target-vc.domain.com" -TargetONTAPCluster "target-ontap.domain.com" -TargetNFSSVM "migration_svm" -SkipGuestIPConfig
-
 .NOTES
     Author: PowerShell Automation
-    Version: 1.0
+    Version: 2.0
     Requires: VMware.PowerCLI, NetApp.ONTAP modules
     
     This script requires administrative privileges and proper credentials for:
     - Source vCenter Server
     - Target vCenter Server  
     - Target NetApp ONTAP Cluster
-    - Guest Operating Systems (for automated IP configuration)
     
-    Supported guest operating systems for automated IP configuration:
-    - Windows Server 2012 R2 and later
-    - Linux distributions with NetworkManager, systemd-networkd, or traditional networking
+    VMs retain their existing IP addresses and network configuration during migration.
+    Datastores are automatically discovered and mounted with matching names on the target cluster.
 #>
 
 [CmdletBinding(SupportsShouldProcess)]
@@ -92,18 +81,13 @@ param(
     [Parameter(Mandatory = $false)]
     [string]$BackupTier = "Tier3",
     
-    [Parameter(Mandatory = $false)]
-    [System.Management.Automation.PSCredential]$GuestCredentials,
-    
-    [Parameter(Mandatory = $false)]
-    [switch]$SkipGuestIPConfig,
-    
     [switch]$WhatIf
 )
 
 # Global Variables
 $script:LogFile = $LogPath
 $script:MigrationData = @()
+$script:VMDatastoreMap = @{}
 $script:SourceVIServer = $null
 $script:TargetVIServer = $null
 $script:ONTAPConnection = $null
@@ -173,7 +157,7 @@ function Test-Prerequisites {
     # Test CSV file format
     try {
         $TestCSV = Import-Csv -Path $CSVPath
-        $RequiredColumns = @('VMName', 'VMDatastore', 'TargetVLAN', 'TargetIP', 'TargetSNMask', 'TargetGW', 'TargetDNS1', 'TargetDNS2')
+        $RequiredColumns = @('VMName')
         
         $CSVColumns = $TestCSV | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name
         
@@ -213,14 +197,6 @@ function Get-Credentials {
     Write-Host "`nEnter credentials for Target ONTAP Cluster (${TargetONTAPCluster}):" -ForegroundColor Yellow
     $script:ONTAPCredentials = Get-Credential -Message "ONTAP Cluster Credentials"
     
-    # Guest OS credentials (if not provided and not skipping IP config)
-    if (-not $GuestCredentials -and -not $SkipGuestIPConfig) {
-        Write-Host "`nEnter credentials for Guest OS operations (Local Admin or Domain Admin):" -ForegroundColor Yellow
-        $script:GuestOSCredentials = Get-Credential -Message "Guest OS Credentials"
-    } elseif ($GuestCredentials) {
-        $script:GuestOSCredentials = $GuestCredentials
-    }
-    
     Write-Log "Credentials collected successfully" -Level "SUCCESS"
 }
 
@@ -231,31 +207,28 @@ function Connect-Infrastructure {
     Write-Log "Connecting to infrastructure components..." -Level "INFO"
     
     try {
-        # Connect to Source vCenter
+        # Connect to Source vCenter (always connect for discovery)
         Write-Log "Connecting to Source vCenter: ${SourcevCenter}" -Level "INFO"
-        if (-not $WhatIf) {
-            $script:SourceVIServer = Connect-VIServer -Server $SourcevCenter -Credential $script:SourcevCenterCredentials -ErrorAction Stop
-            Write-Log "Successfully connected to Source vCenter" -Level "SUCCESS"
-        } else {
-            Write-Log "[WHATIF] Would connect to Source vCenter: ${SourcevCenter}" -Level "INFO"
+        $script:SourceVIServer = Connect-VIServer -Server $SourcevCenter -Credential $script:SourcevCenterCredentials -ErrorAction Stop
+        Write-Log "Successfully connected to Source vCenter" -Level "SUCCESS"
+        if ($WhatIf) {
+            Write-Log "[WHATIF] Connected for discovery only - no changes will be made to source environment" -Level "INFO"
         }
         
-        # Connect to Target vCenter
+        # Connect to Target vCenter (always connect for discovery)
         Write-Log "Connecting to Target vCenter: ${TargetvCenter}" -Level "INFO" 
-        if (-not $WhatIf) {
-            $script:TargetVIServer = Connect-VIServer -Server $TargetvCenter -Credential $script:TargetvCenterCredentials -ErrorAction Stop
-            Write-Log "Successfully connected to Target vCenter" -Level "SUCCESS"
-        } else {
-            Write-Log "[WHATIF] Would connect to Target vCenter: ${TargetvCenter}" -Level "INFO"
+        $script:TargetVIServer = Connect-VIServer -Server $TargetvCenter -Credential $script:TargetvCenterCredentials -ErrorAction Stop
+        Write-Log "Successfully connected to Target vCenter" -Level "SUCCESS"
+        if ($WhatIf) {
+            Write-Log "[WHATIF] Connected for discovery only - no changes will be made to target environment" -Level "INFO"
         }
         
-        # Connect to ONTAP Cluster
+        # Connect to ONTAP Cluster (always connect for discovery)
         Write-Log "Connecting to ONTAP Cluster: ${TargetONTAPCluster}" -Level "INFO"
-        if (-not $WhatIf) {
-            $script:ONTAPConnection = Connect-NcController -Name $TargetONTAPCluster -Credential $script:ONTAPCredentials -ErrorAction Stop
-            Write-Log "Successfully connected to ONTAP Cluster" -Level "SUCCESS"
-        } else {
-            Write-Log "[WHATIF] Would connect to ONTAP Cluster: ${TargetONTAPCluster}" -Level "INFO"
+        $script:ONTAPConnection = Connect-NcController -Name $TargetONTAPCluster -Credential $script:ONTAPCredentials -ErrorAction Stop
+        Write-Log "Successfully connected to ONTAP Cluster" -Level "SUCCESS"
+        if ($WhatIf) {
+            Write-Log "[WHATIF] Connected for discovery only - no changes will be made to ONTAP cluster" -Level "INFO"
         }
         
         return $true
@@ -270,29 +243,43 @@ function Get-SourceDatastores {
     [CmdletBinding()]
     param()
     
-    Write-Log "Step 1: Discovering NFS Datastores for VMs to be migrated..." -Level "INFO"
+    Write-Log "Step 1: Discovering VMs and their NFS Datastores..." -Level "INFO"
     
-    $UniqueDatastores = $script:MigrationData | Select-Object -ExpandProperty VMDatastore -Unique
     $DiscoveredDatastores = @{}
+    $VMDatastoreMap = @{}
     
-    foreach ($DatastoreName in $UniqueDatastores) {
+    foreach ($VMData in $script:MigrationData) {
         try {
-            if (-not $WhatIf) {
-                $Datastore = Get-Datastore -Server $script:SourceVIServer -Name $DatastoreName -ErrorAction Stop
-                $DiscoveredDatastores[$DatastoreName] = $Datastore
-                Write-Log "Found datastore: ${DatastoreName} (Type: $($Datastore.Type), Capacity: $([math]::Round($Datastore.CapacityGB, 2)) GB)" -Level "SUCCESS"
-            } else {
-                Write-Log "[WHATIF] Would discover datastore: ${DatastoreName}" -Level "INFO"
-                $DiscoveredDatastores[$DatastoreName] = $null
+            # Always perform discovery (read-only operation)
+            $VMObject = Get-VM -Server $script:SourceVIServer -Name $VMData.VMName -ErrorAction Stop
+            $VMDatastore = Get-Datastore -VM $VMObject | Select-Object -First 1
+            
+            # Store VM to datastore mapping
+            $VMDatastoreMap[$VMData.VMName] = $VMDatastore.Name
+            
+            # Add datastore to discovery list if not already present
+            if ($VMDatastore.Name -notin $DiscoveredDatastores.Keys) {
+                $DiscoveredDatastores[$VMDatastore.Name] = $VMDatastore
+                $LogLevel = if ($WhatIf) { "INFO" } else { "SUCCESS" }
+                $Prefix = if ($WhatIf) { "[WHATIF] " } else { "" }
+                Write-Log "${Prefix}Discovered datastore: $($VMDatastore.Name) (Type: $($VMDatastore.Type), Capacity: $([math]::Round($VMDatastore.CapacityGB, 2)) GB)" -Level $LogLevel
             }
+            
+            $Prefix = if ($WhatIf) { "[WHATIF] " } else { "" }
+            Write-Log "${Prefix}VM $($VMData.VMName) is located on datastore: $($VMDatastore.Name)" -Level "INFO"
         }
         catch {
-            Write-Log "Failed to find datastore ${DatastoreName}: ${_}" -Level "ERROR"
+            Write-Log "Failed to find VM $($VMData.VMName) or its datastore: ${_}" -Level "ERROR"
             return $null
         }
     }
     
-    Write-Log "Successfully discovered $($DiscoveredDatastores.Count) unique datastores" -Level "SUCCESS"
+    # Store the VM-to-datastore mapping for use by other functions
+    $script:VMDatastoreMap = $VMDatastoreMap
+    
+    $Prefix = if ($WhatIf) { "[WHATIF] " } else { "" }
+    $LogLevel = if ($WhatIf) { "INFO" } else { "SUCCESS" }
+    Write-Log "${Prefix}Successfully discovered $($DiscoveredDatastores.Count) unique datastores for $($script:MigrationData.Count) VMs" -Level $LogLevel
     return $DiscoveredDatastores
 }
 
@@ -359,15 +346,22 @@ function Update-SnapMirrorRelationships {
     
     foreach ($DatastoreName in $Datastores.Keys) {
         try {
-            if (-not $WhatIf) {
-                # Find SnapMirror relationships for this datastore
-                $SnapMirrorRelations = Get-NcSnapmirror -DestinationVserver $TargetNFSSVM | Where-Object { 
-                    $_.DestinationVolume -like "*$DatastoreName*" 
-                }
+            # Always discover SnapMirror relationships (read-only operation)
+            $SnapMirrorRelations = Get-NcSnapmirror -DestinationVserver $TargetNFSSVM | Where-Object { 
+                $_.DestinationVolume -like "*$DatastoreName*" 
+            }
+            
+            if ($SnapMirrorRelations.Count -eq 0) {
+                $Prefix = if ($WhatIf) { "[WHATIF] " } else { "" }
+                Write-Log "${Prefix}No SnapMirror relationships found for datastore: ${DatastoreName}" -Level "WARNING"
+                continue
+            }
+            
+            foreach ($Relation in $SnapMirrorRelations) {
+                $Prefix = if ($WhatIf) { "[WHATIF] Would process" } else { "Processing" }
+                Write-Log "${Prefix} SnapMirror relationship: $($Relation.SourcePath) -> $($Relation.DestinationPath)" -Level "INFO"
                 
-                foreach ($Relation in $SnapMirrorRelations) {
-                    Write-Log "Processing SnapMirror relationship: $($Relation.SourcePath) -> $($Relation.DestinationPath)" -Level "INFO"
-                    
+                if (-not $WhatIf) {
                     # Update the relationship
                     Write-Log "Updating SnapMirror relationship for volume: $($Relation.DestinationVolume)" -Level "INFO"
                     Invoke-NcSnapmirrorUpdate -DestinationPath $Relation.DestinationPath | Out-Null
@@ -387,11 +381,12 @@ function Update-SnapMirrorRelationships {
                     Write-Log "Breaking SnapMirror relationship for volume: $($Relation.DestinationVolume)" -Level "INFO" 
                     Invoke-NcSnapmirrorBreak -DestinationPath $Relation.DestinationPath | Out-Null
                     
-                    $ProcessedVolumes += $Relation.DestinationVolume
                     Write-Log "Successfully processed SnapMirror relationship for volume: $($Relation.DestinationVolume)" -Level "SUCCESS"
+                } else {
+                    Write-Log "[WHATIF] Would update/quiesce/break SnapMirror relationship for volume: $($Relation.DestinationVolume)" -Level "INFO"
                 }
-            } else {
-                Write-Log "[WHATIF] Would update/quiesce/break SnapMirror relationships for datastore: ${DatastoreName}" -Level "INFO"
+                
+                $ProcessedVolumes += $Relation.DestinationVolume
             }
         }
         catch {
@@ -415,33 +410,33 @@ function Mount-TargetDatastores {
     
     foreach ($DatastoreName in $Datastores.Keys) {
         try {
-            if (-not $WhatIf) {
-                # Get NFS export path from ONTAP
-                $Volume = Get-NcVol -VserverContext $TargetNFSSVM | Where-Object { 
-                    $_.Name -like "*$DatastoreName*" 
-                } | Select-Object -First 1
+            # Always discover volumes and NFS servers (read-only operations)
+            $Volume = Get-NcVol -VserverContext $TargetNFSSVM | Where-Object { 
+                $_.Name -like "*$DatastoreName*" 
+            } | Select-Object -First 1
+            
+            if ($Volume) {
+                $NFSExportPath = "/$($Volume.Name)"
+                $NFSServer = (Get-NcNetInterface -VserverContext $TargetNFSSVM | Where-Object { 
+                    $_.Role -eq "data" -and $_.DataProtocols -contains "nfs" 
+                } | Select-Object -First 1).Address
                 
-                if ($Volume) {
-                    $NFSExportPath = "/$($Volume.Name)"
-                    $NFSServer = (Get-NcNetInterface -VserverContext $TargetNFSSVM | Where-Object { 
-                        $_.Role -eq "data" -and $_.DataProtocols -contains "nfs" 
-                    } | Select-Object -First 1).Address
-                    
-                    Write-Log "Mounting NFS datastore: ${DatastoreName} from ${NFSServer}:${NFSExportPath}" -Level "INFO"
-                    
-                    # Get target cluster hosts
+                $Prefix = if ($WhatIf) { "[WHATIF] Would mount" } else { "Mounting" }
+                Write-Log "${Prefix} NFS datastore: ${DatastoreName} from ${NFSServer}:${NFSExportPath}" -Level "INFO"
+                
+                if (-not $WhatIf) {
+                    # Get target cluster hosts and mount datastores (write operations)
                     $VMHosts = Get-VMHost -Server $script:TargetVIServer
                     foreach ($VMHost in $VMHosts) {
                         $NewDatastore = New-Datastore -VMHost $VMHost -Name $DatastoreName -Nfs -NfsHost $NFSServer -Path $NFSExportPath
                         Write-Log "Mounted NFS datastore ${DatastoreName} on host $($VMHost.Name)" -Level "SUCCESS"
                     }
-                    
-                    $MountedDatastores += $DatastoreName
-                } else {
-                    Write-Log "Could not find matching volume for datastore: ${DatastoreName}" -Level "ERROR"
                 }
+                
+                $MountedDatastores += $DatastoreName
             } else {
-                Write-Log "[WHATIF] Would mount NFS datastore: ${DatastoreName}" -Level "INFO"
+                $Prefix = if ($WhatIf) { "[WHATIF] " } else { "" }
+                Write-Log "${Prefix}Could not find matching volume for datastore: ${DatastoreName}" -Level "ERROR"
             }
         }
         catch {
@@ -464,11 +459,12 @@ function Register-TargetVMs {
     foreach ($VM in $script:MigrationData) {
         try {
             if (-not $WhatIf) {
-                # Find the VM's VMX file in the target datastore
-                $Datastore = Get-Datastore -Server $script:TargetVIServer -Name $VM.VMDatastore -ErrorAction Stop
-                $VMXPath = "[$($VM.VMDatastore)] $($VM.VMName)/$($VM.VMName).vmx"
+                # Get the discovered datastore for this VM
+                $VMDatastore = $script:VMDatastoreMap[$VM.VMName]
+                $Datastore = Get-Datastore -Server $script:TargetVIServer -Name $VMDatastore -ErrorAction Stop
+                $VMXPath = "[${VMDatastore}] $($VM.VMName)/$($VM.VMName).vmx"
                 
-                Write-Log "Registering VM: $($VM.VMName) from path: ${VMXPath}" -Level "INFO"
+                Write-Log "Registering VM: $($VM.VMName) from datastore ${VMDatastore}, path: ${VMXPath}" -Level "INFO"
                 
                 # Get a target host for registration
                 $TargetHost = Get-VMHost -Server $script:TargetVIServer | Select-Object -First 1
@@ -479,7 +475,8 @@ function Register-TargetVMs {
                 $RegisteredVMs += $VM.VMName
                 Write-Log "Successfully registered VM: $($VM.VMName)" -Level "SUCCESS"
             } else {
-                Write-Log "[WHATIF] Would register VM: $($VM.VMName)" -Level "INFO"
+                $VMDatastore = $script:VMDatastoreMap[$VM.VMName]
+                Write-Log "[WHATIF] Would register VM: $($VM.VMName) from datastore: ${VMDatastore}" -Level "INFO"
             }
         }
         catch {
@@ -491,54 +488,12 @@ function Register-TargetVMs {
     return $RegisteredVMs
 }
 
-function Update-VMNetworkConfiguration {
-    [CmdletBinding()]
-    param()
-    
-    Write-Log "Step 6: Updating VM network configurations..." -Level "INFO"
-    
-    $UpdatedVMs = @()
-    
-    foreach ($VM in $script:MigrationData) {
-        try {
-            if (-not $WhatIf) {
-                $VMObject = Get-VM -Server $script:TargetVIServer -Name $VM.VMName -ErrorAction Stop
-                
-                Write-Log "Updating network configuration for VM: $($VM.VMName)" -Level "INFO"
-                
-                # Get the VM's network adapter
-                $NetworkAdapter = Get-NetworkAdapter -VM $VMObject | Select-Object -First 1
-                
-                # Get or create the target port group
-                $TargetPortGroup = Get-VDPortgroup -Server $script:TargetVIServer -Name $VM.TargetVLAN -ErrorAction SilentlyContinue
-                if (-not $TargetPortGroup) {
-                    Write-Log "Port group $($VM.TargetVLAN) not found. Please ensure it exists before proceeding." -Level "ERROR"
-                    continue
-                }
-                
-                # Update network adapter to new VLAN
-                $NetworkAdapter | Set-NetworkAdapter -Portgroup $TargetPortGroup -Confirm:$false | Out-Null
-                
-                Write-Log "Updated VM $($VM.VMName) to VLAN: $($VM.TargetVLAN)" -Level "SUCCESS"
-                $UpdatedVMs += $VM.VMName
-            } else {
-                Write-Log "[WHATIF] Would update network configuration for VM: $($VM.VMName) to VLAN: $($VM.TargetVLAN)" -Level "INFO"
-            }
-        }
-        catch {
-            Write-Log "Failed to update network configuration for VM $($VM.VMName): ${_}" -Level "ERROR"
-        }
-    }
-    
-    Write-Log "Completed network configuration updates. Successfully updated: $($UpdatedVMs.Count)" -Level "SUCCESS"
-    return $UpdatedVMs
-}
 
 function Start-TargetVMs {
     [CmdletBinding()]
     param()
     
-    Write-Log "Step 7: Powering on VMs and answering relocation questions..." -Level "INFO"
+    Write-Log "Step 6: Powering on VMs and answering relocation questions..." -Level "INFO"
     
     $StartedVMs = @()
     
@@ -560,22 +515,8 @@ function Start-TargetVMs {
                     $VMView.AnswerVM($VMView.Runtime.Question.Id, "0") # "0" typically means "I moved it"
                 }
                 
-                # Wait for VMware Tools to be ready
-                Write-Log "Waiting for VMware Tools to be ready on $($VM.VMName)..." -Level "INFO"
-                $Timeout = 300 # 5 minutes
-                $Timer = 0
-                do {
-                    Start-Sleep -Seconds 15
-                    $Timer += 15
-                    $VMObject = Get-VM -Server $script:TargetVIServer -Name $VM.VMName
-                    Write-Log "Waiting for VMware Tools on $($VM.VMName)... Status: $($VMObject.ExtensionData.Guest.ToolsStatus) ($Timer/$Timeout seconds)" -Level "INFO"
-                } while ($VMObject.ExtensionData.Guest.ToolsStatus -ne "toolsOk" -and $Timer -lt $Timeout)
-                
-                if ($VMObject.ExtensionData.Guest.ToolsStatus -eq "toolsOk") {
-                    Write-Log "VMware Tools ready on $($VM.VMName)" -Level "SUCCESS"
-                } else {
-                    Write-Log "VMware Tools timeout on $($VM.VMName). Continuing anyway..." -Level "WARNING"
-                }
+                # Allow VM to complete startup
+                Start-Sleep -Seconds 15
                 
                 $StartedVMs += $VM.VMName  
                 Write-Log "Successfully started VM: $($VM.VMName)" -Level "SUCCESS"
@@ -592,253 +533,12 @@ function Start-TargetVMs {
     return $StartedVMs
 }
 
-function Set-GuestIPConfiguration {
-    [CmdletBinding()]
-    param()
-    
-    Write-Log "Step 7.5: Configuring guest OS IP settings..." -Level "INFO"
-    
-    if ($SkipGuestIPConfig) {
-        Write-Log "Skipping guest IP configuration per parameter" -Level "INFO"
-        return @()
-    }
-    
-    if (-not $script:GuestOSCredentials) {
-        Write-Log "No guest credentials provided. Skipping IP configuration" -Level "WARNING"
-        return @()
-    }
-    
-    $ConfiguredVMs = @()
-    
-    foreach ($VM in $script:MigrationData) {
-        try {
-            if (-not $WhatIf) {
-                $VMObject = Get-VM -Server $script:TargetVIServer -Name $VM.VMName -ErrorAction Stop
-                
-                # Skip if VMware Tools is not ready
-                if ($VMObject.ExtensionData.Guest.ToolsStatus -ne "toolsOk") {
-                    Write-Log "VMware Tools not ready on $($VM.VMName). Skipping IP configuration" -Level "WARNING"
-                    continue
-                }
-                
-                Write-Log "Configuring IP settings for VM: $($VM.VMName)" -Level "INFO"
-                
-                # Detect guest OS type
-                $GuestOS = $VMObject.ExtensionData.Guest.GuestFamily
-                Write-Log "Detected guest OS family: ${GuestOS} for VM: $($VM.VMName)" -Level "INFO"
-                
-                if ($GuestOS -eq "windowsGuest") {
-                    # Windows IP configuration
-                    $WindowsScript = @"
-# Configure Windows network settings
-`$ErrorActionPreference = 'Stop'
-try {
-    # Get the primary network adapter
-    `$Adapter = Get-NetAdapter | Where-Object { `$_.Status -eq 'Up' -and `$_.Name -like '*Ethernet*' } | Select-Object -First 1
-    
-    if (`$Adapter) {
-        Write-Host "Configuring adapter: `$(`$Adapter.Name)"
-        
-        # Remove existing IP configuration
-        Remove-NetIPAddress -InterfaceAlias `$Adapter.Name -Confirm:`$false -ErrorAction SilentlyContinue
-        Remove-NetRoute -InterfaceAlias `$Adapter.Name -Confirm:`$false -ErrorAction SilentlyContinue
-        
-        # Set new IP configuration
-        New-NetIPAddress -InterfaceAlias `$Adapter.Name -IPAddress "$($VM.TargetIP)" -PrefixLength $(Get-PrefixLength "$($VM.TargetSNMask)") -DefaultGateway "$($VM.TargetGW)" | Out-Null
-        
-        # Set DNS servers
-        Set-DnsClientServerAddress -InterfaceAlias `$Adapter.Name -ServerAddresses "$($VM.TargetDNS1)","$($VM.TargetDNS2)" | Out-Null
-        
-        # Test connectivity
-        `$TestResult = Test-NetConnection -ComputerName "$($VM.TargetGW)" -InformationLevel Quiet
-        if (`$TestResult) {
-            Write-Host "Network configuration successful - Gateway reachable"
-        } else {
-            Write-Host "Warning: Gateway not reachable after configuration"
-        }
-        
-        # Output current configuration
-        Get-NetIPAddress -InterfaceAlias `$Adapter.Name -AddressFamily IPv4 | Select-Object IPAddress, PrefixLength
-        Get-NetRoute -InterfaceAlias `$Adapter.Name | Where-Object { `$_.DestinationPrefix -eq '0.0.0.0/0' } | Select-Object NextHop
-    } else {
-        Write-Host "Error: No active Ethernet adapter found"
-        exit 1
-    }
-} catch {
-    Write-Host "Error configuring network: `$(`$_.Exception.Message)"
-    exit 1
-}
-
-function Get-PrefixLength {
-    param(`$SubnetMask)
-    `$Bits = 0
-    `$SubnetMask.Split('.') | ForEach-Object {
-        `$Octet = [int]`$_
-        while (`$Octet -gt 0) {
-            `$Bits += `$Octet -band 1
-            `$Octet = `$Octet -shr 1
-        }
-    }
-    return `$Bits
-}
-"@
-                    
-                    Write-Log "Executing Windows IP configuration script on $($VM.VMName)" -Level "INFO"
-                    $Result = Invoke-VMScript -VM $VMObject -ScriptText $WindowsScript -GuestCredential $script:GuestOSCredentials -ScriptType PowerShell
-                    
-                } elseif ($GuestOS -eq "linuxGuest") {
-                    # Linux IP configuration (supports most modern distributions)
-                    $LinuxScript = @"
-#!/bin/bash
-set -e
-
-# Function to detect network manager
-detect_network_manager() {
-    if systemctl is-active --quiet NetworkManager; then
-        echo "NetworkManager"
-    elif systemctl is-active --quiet networking; then
-        echo "networking"
-    elif systemctl is-active --quiet systemd-networkd; then
-        echo "systemd-networkd"
-    else
-        echo "unknown"
-    fi
-}
-
-# Get primary interface
-INTERFACE=`$(ip route | grep default | awk '{print `$5}' | head -n1)
-if [ -z "`$INTERFACE" ]; then
-    INTERFACE=`$(ip link show | grep -E '^[0-9]+: (eth|ens|eno|enp)' | head -n1 | awk -F': ' '{print `$2}')
-fi
-
-if [ -z "`$INTERFACE" ]; then
-    echo "Error: Could not determine primary network interface"
-    exit 1
-fi
-
-echo "Configuring interface: `$INTERFACE"
-
-# Convert subnet mask to CIDR
-subnet_to_cidr() {
-    local subnet=`$1
-    local cidr=0
-    IFS=. read -r a b c d <<< "`$subnet"
-    for octet in `$a `$b `$c `$d; do
-        while [ `$octet -ne 0 ]; do
-            cidr=`$((cidr + (octet & 1)))
-            octet=`$((octet >> 1))
-        done
-    done
-    echo `$cidr
-}
-
-CIDR=`$(subnet_to_cidr "$($VM.TargetSNMask)")
-NETWORK_MANAGER=`$(detect_network_manager)
-
-echo "Detected network manager: `$NETWORK_MANAGER"
-
-case `$NETWORK_MANAGER in
-    "NetworkManager")
-        # Use nmcli for NetworkManager
-        CONNECTION=`$(nmcli -t -f NAME connection show --active | head -n1)
-        if [ -n "`$CONNECTION" ]; then
-            nmcli connection modify "`$CONNECTION" ipv4.addresses "$($VM.TargetIP)/`$CIDR"
-            nmcli connection modify "`$CONNECTION" ipv4.gateway "$($VM.TargetGW)"
-            nmcli connection modify "`$CONNECTION" ipv4.dns "$($VM.TargetDNS1),$($VM.TargetDNS2)"
-            nmcli connection modify "`$CONNECTION" ipv4.method manual
-            nmcli connection up "`$CONNECTION"
-        else
-            echo "Error: No active NetworkManager connection found"
-            exit 1
-        fi
-        ;;
-    "networking")
-        # Traditional /etc/network/interfaces (Debian/Ubuntu)
-        cat > /etc/network/interfaces.d/`$INTERFACE << EOF
-auto `$INTERFACE
-iface `$INTERFACE inet static
-address $($VM.TargetIP)
-netmask $($VM.TargetSNMask)
-gateway $($VM.TargetGW)
-dns-nameservers $($VM.TargetDNS1) $($VM.TargetDNS2)
-EOF
-        systemctl restart networking
-        ;;
-    "systemd-networkd")
-        # systemd-networkd configuration
-        cat > /etc/systemd/network/20-wired.network << EOF
-[Match]
-Name=`$INTERFACE
-
-[Network]
-Address=$($VM.TargetIP)/`$CIDR
-Gateway=$($VM.TargetGW)
-DNS=$($VM.TargetDNS1)
-DNS=$($VM.TargetDNS2)
-EOF
-        systemctl restart systemd-networkd
-        ;;
-    *)
-        # Fallback to manual configuration
-        ip addr flush dev `$INTERFACE
-        ip addr add $($VM.TargetIP)/`$CIDR dev `$INTERFACE
-        ip route add default via $($VM.TargetGW) dev `$INTERFACE
-        echo "nameserver $($VM.TargetDNS1)" > /etc/resolv.conf
-        echo "nameserver $($VM.TargetDNS2)" >> /etc/resolv.conf
-        ;;
-esac
-
-# Test connectivity
-echo "Testing network configuration..."
-ping -c 2 "$($VM.TargetGW)" > /dev/null 2>&1
-if [ `$? -eq 0 ]; then
-    echo "Network configuration successful - Gateway reachable"
-else
-    echo "Warning: Gateway not reachable after configuration"
-fi
-
-# Show current configuration
-echo "Current IP configuration:"
-ip addr show `$INTERFACE | grep -E 'inet '
-ip route show default
-"@
-                    
-                    Write-Log "Executing Linux IP configuration script on $($VM.VMName)" -Level "INFO"
-                    $Result = Invoke-VMScript -VM $VMObject -ScriptText $LinuxScript -GuestCredential $script:GuestOSCredentials -ScriptType Bash
-                    
-                } else {
-                    Write-Log "Unsupported guest OS family '${GuestOS}' for VM $($VM.VMName). Skipping IP configuration" -Level "WARNING"
-                    continue
-                }
-                
-                # Check script execution result
-                if ($Result.ExitCode -eq 0) {
-                    Write-Log "Successfully configured IP settings for $($VM.VMName): $($VM.TargetIP)" -Level "SUCCESS"
-                    Write-Log "Script output: $($Result.ScriptOutput)" -Level "INFO"
-                    $ConfiguredVMs += $VM.VMName
-                } else {
-                    Write-Log "Failed to configure IP for $($VM.VMName). Exit code: $($Result.ExitCode)" -Level "ERROR"
-                    Write-Log "Error output: $($Result.ScriptOutput)" -Level "ERROR"
-                }
-                
-            } else {
-                Write-Log "[WHATIF] Would configure IP settings for VM: $($VM.VMName) to IP: $($VM.TargetIP)" -Level "INFO"
-            }
-        }
-        catch {
-            Write-Log "Failed to configure IP for VM $($VM.VMName): ${_}" -Level "ERROR"
-        }
-    }
-    
-    Write-Log "Completed guest IP configuration. Successfully configured: $($ConfiguredVMs.Count)" -Level "SUCCESS"
-    return $ConfiguredVMs
-}
 
 function Add-BackupTags {
     [CmdletBinding()]
     param()
     
-    Write-Log "Step 8: Adding backup tags to VMs..." -Level "INFO"
+    Write-Log "Step 7: Adding backup tags to VMs..." -Level "INFO"
     
     $TaggedVMs = @()
     
@@ -888,7 +588,7 @@ function Disconnect-SourceVMNetworks {
     [CmdletBinding()]
     param()
     
-    Write-Log "Step 9: Disconnecting source VM network adapters..." -Level "INFO"
+    Write-Log "Step 8: Disconnecting source VM network adapters..." -Level "INFO"
     
     # Prompt for confirmation
     if (-not $WhatIf) {
@@ -930,7 +630,7 @@ function Unregister-SourceVMs {
     [CmdletBinding()]
     param()
     
-    Write-Log "Step 10: Unregistering VMs from source vCenter..." -Level "INFO"
+    Write-Log "Step 9: Unregistering VMs from source vCenter..." -Level "INFO"
     
     # Prompt for confirmation
     if (-not $WhatIf) {
@@ -1036,9 +736,8 @@ try {
         exit 1
     }
     
-    if (-not $WhatIf) {
-        Get-Credentials
-    }
+    # Always collect credentials (needed for connections even in WhatIf mode)
+    Get-Credentials
     
     if (-not (Connect-Infrastructure)) {
         Write-Log "Infrastructure connection failed. Exiting." -Level "ERROR"
@@ -1056,9 +755,7 @@ try {
     $ProcessedVolumes = Update-SnapMirrorRelationships -Datastores $Datastores
     $MountedDatastores = Mount-TargetDatastores -Datastores $Datastores
     $RegisteredVMs = Register-TargetVMs
-    $UpdatedVMs = Update-VMNetworkConfiguration
     $StartedVMs = Start-TargetVMs
-    $ConfiguredVMs = Set-GuestIPConfiguration
     $TaggedVMs = Add-BackupTags
     $DisconnectedVMs = Disconnect-SourceVMNetworks
     $UnregisteredVMs = Unregister-SourceVMs
