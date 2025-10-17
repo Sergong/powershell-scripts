@@ -454,6 +454,18 @@ function Register-TargetVMs {
     
     Write-Log "Step 5: Registering VMs in target vCenter..." -Level "INFO"
     
+    # Prompt for confirmation before registering VMs
+    if (-not $WhatIf) {
+        Write-Host "`nReady to register $($script:MigrationData.Count) VMs in target vCenter." -ForegroundColor Yellow
+        Write-Host "This will make the VMs visible in the target environment but they will remain powered off." -ForegroundColor Yellow
+        $Confirmation = Read-Host "Continue with VM registration? (y/N)"
+        if ($Confirmation -ne 'y' -and $Confirmation -ne 'Y') {
+            Write-Log "VM registration cancelled by user" -Level "WARNING"
+            return @()
+        }
+        Write-Log "User confirmed VM registration. Proceeding..." -Level "INFO"
+    }
+    
     $RegisteredVMs = @()
     
     foreach ($VM in $script:MigrationData) {
@@ -494,6 +506,19 @@ function Start-TargetVMs {
     param()
     
     Write-Log "Step 6: Powering on VMs and answering relocation questions..." -Level "INFO"
+    
+    # Prompt for confirmation before starting VMs
+    if (-not $WhatIf) {
+        Write-Host "`nReady to power on $($script:MigrationData.Count) VMs in target environment." -ForegroundColor Yellow
+        Write-Host "This will start the VMs and make them active on the target cluster." -ForegroundColor Yellow
+        Write-Host "WARNING: This is the point of no return - VMs will be running on the target environment." -ForegroundColor Red
+        $Confirmation = Read-Host "Continue with powering on VMs? (y/N)"
+        if ($Confirmation -ne 'y' -and $Confirmation -ne 'Y') {
+            Write-Log "VM startup cancelled by user" -Level "WARNING"
+            return @()
+        }
+        Write-Log "User confirmed VM startup. Proceeding with power on operations..." -Level "INFO"
+    }
     
     $StartedVMs = @()
     
