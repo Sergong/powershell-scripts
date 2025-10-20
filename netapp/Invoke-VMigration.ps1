@@ -384,12 +384,29 @@ function Update-SnapMirrorRelationships {
             # Filter relationships for this datastore with more precise matching
             $SnapMirrorRelations = @()
             Write-Log "${Prefix}Debug - Looking for datastore: '$DatastoreName'" -Level "INFO"
-            Write-Log "${Prefix}Debug - Available destination volumes: $($AllSnapMirrorRelations.DestinationVolume -join ', ')" -Level "INFO"
+            
+            # Extract volume names from DestinationLocation for debug display
+            $AvailableVolumes = @()
+            foreach ($Rel in $AllSnapMirrorRelations) {
+                if ($Rel.DestinationLocation) {
+                    $VolName = ($Rel.DestinationLocation -split ':')[-1]
+                    $AvailableVolumes += $VolName
+                }
+            }
+            Write-Log "${Prefix}Debug - Available destination volumes: $($AvailableVolumes -join ', ')" -Level "INFO"
             
             foreach ($Relation in $AllSnapMirrorRelations) {
-                # Get the volume name - try DestinationVolume first, then extract from DestinationPath
-                $VolumeToCompare = $Relation.DestinationVolume
-                if ([string]::IsNullOrEmpty($VolumeToCompare) -and $Relation.DestinationPath) {
+                # Get the volume name from DestinationLocation (format: SVM:VolumeName)
+                $VolumeToCompare = ""
+                if ($Relation.DestinationLocation) {
+                    $VolumeToCompare = ($Relation.DestinationLocation -split ':')[-1]
+                }
+                # Fallback to DestinationVolume if available
+                elseif ($Relation.DestinationVolume) {
+                    $VolumeToCompare = $Relation.DestinationVolume
+                }
+                # Fallback to DestinationPath if available
+                elseif ($Relation.DestinationPath) {
                     $VolumeToCompare = ($Relation.DestinationPath -split ':')[-1]
                 }
                 
@@ -406,9 +423,17 @@ function Update-SnapMirrorRelationships {
             if ($SnapMirrorRelations.Count -eq 0) {
                 Write-Log "${Prefix}Debug - No exact match found, trying pattern matching..." -Level "INFO"
                 foreach ($Relation in $AllSnapMirrorRelations) {
-                    # Get the volume name - try DestinationVolume first, then extract from DestinationPath
-                    $VolumeToCompare = $Relation.DestinationVolume
-                    if ([string]::IsNullOrEmpty($VolumeToCompare) -and $Relation.DestinationPath) {
+                    # Get the volume name from DestinationLocation (format: SVM:VolumeName)
+                    $VolumeToCompare = ""
+                    if ($Relation.DestinationLocation) {
+                        $VolumeToCompare = ($Relation.DestinationLocation -split ':')[-1]
+                    }
+                    # Fallback to DestinationVolume if available
+                    elseif ($Relation.DestinationVolume) {
+                        $VolumeToCompare = $Relation.DestinationVolume
+                    }
+                    # Fallback to DestinationPath if available
+                    elseif ($Relation.DestinationPath) {
                         $VolumeToCompare = ($Relation.DestinationPath -split ':')[-1]
                     }
                     
