@@ -79,9 +79,7 @@ param(
     [string]$LogPath = ".\VMMigration_$(Get-Date -Format 'yyyyMMdd_HHmmss').log",
     
     [Parameter(Mandatory = $false)]
-    [string]$BackupTier = "Tier3",
-    
-    [switch]$WhatIf
+    [string]$BackupTier = "Tier3"
 )
 
 # Global Variables
