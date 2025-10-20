@@ -451,10 +451,10 @@ function Update-SnapMirrorRelationships {
             foreach ($Relation in $SnapMirrorRelations) {
                 # Get the correct volume name and destination path
                 $VolumeToProcess = ""
-                $DestinationPath = ""
+                $Destination = ""
                 if ($Relation.DestinationLocation) {
                     $VolumeToProcess = ($Relation.DestinationLocation -split ':')[-1]
-                    $DestinationPath = $Relation.DestinationLocation
+                    $Destination = $Relation.DestinationLocation
                 }
                 
                 $Prefix = if ($WhatIf) { "[WHATIF] Would process" } else { "Processing" }
@@ -463,25 +463,25 @@ function Update-SnapMirrorRelationships {
                 if (-not $WhatIf) {
                     # Update the relationship
                     Write-Log "Updating SnapMirror relationship for volume: $VolumeToProcess" -Level "INFO"
-                    Invoke-NcSnapmirrorUpdate -Destination $DestinationPath | Out-Null
+                    Invoke-NcSnapmirrorUpdate -Destination $Destination | Out-Null
                     
                     # Wait for update to complete
                     do {
                         Start-Sleep -Seconds 10
-                        $Status = Get-NcSnapmirror -Destination $DestinationPath
+                        $Status = Get-NcSnapmirror -Destination $Destination
                         Write-Log "Waiting for SnapMirror update to complete. Status: $($Status.Status)" -Level "INFO"
                     } while ($Status.Status -eq "Transferring")
                     
                     # Quiesce the relationship
                     Write-Log "Quiescing SnapMirror relationship for volume: $VolumeToProcess" -Level "INFO"
-                    Invoke-NcSnapmirrorQuiesce -Destination $DestinationPath | Out-Null
+                    Invoke-NcSnapmirrorQuiesce -Destination $Destination | Out-Null
                     
                     # Break the relationship
                     Write-Log "Breaking SnapMirror relationship for volume: $VolumeToProcess" -Level "INFO" 
-                    Invoke-NcSnapmirrorBreak -Destination $DestinationPath | Out-Null
+                    Invoke-NcSnapmirrorBreak -Destination $Destination | Out-Null
                     
                     Write-Log "Successfully processed SnapMirror relationship for volume: $VolumeToProcess" -Level "SUCCESS"
-                } else {
+                }
                     Write-Log "[WHATIF] Would update/quiesce/break SnapMirror relationship for volume: $VolumeToProcess" -Level "INFO"
                 }
                 
