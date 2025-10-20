@@ -334,22 +334,29 @@ function Update-SnapMirrorRelationships {
     foreach ($DatastoreName in $Datastores.Keys) {
         try {
             # Always discover SnapMirror relationships (read-only operation)
+            $Prefix = if ($WhatIf) { "[WHATIF] " } else { "" }
+            Write-Log "${Prefix}Querying SnapMirror relationships for SVM: ${TargetNFSSVM}" -Level "INFO"
+            
             $AllSnapMirrorRelations = Get-NcSnapmirror -DestinationVserver $TargetNFSSVM -ErrorAction Stop
             
-            # Filter relationships for this datastore with multiple pattern matching attempts
+            # Filter relationships for this datastore with more precise matching
             $SnapMirrorRelations = @()
             foreach ($Relation in $AllSnapMirrorRelations) {
-                # Try exact match first
+                # Try exact match first (most reliable)
                 if ($Relation.DestinationVolume -eq $DatastoreName) {
                     $SnapMirrorRelations += $Relation
+                    break  # Found exact match, stop looking
                 }
-                # Try pattern matching
-                elseif ($Relation.DestinationVolume -like "*$DatastoreName*") {
-                    $SnapMirrorRelations += $Relation
-                }
-                # Try reverse pattern (datastore name might be part of volume name)
-                elseif ($DatastoreName -like "*$($Relation.DestinationVolume)*") {
-                    $SnapMirrorRelations += $Relation
+            }
+            
+            # If no exact match, try pattern matching but be more restrictive
+            if ($SnapMirrorRelations.Count -eq 0) {
+                foreach ($Relation in $AllSnapMirrorRelations) {
+                    # Only try pattern matching if datastore name is substantial part of volume name
+                    if ($Relation.DestinationVolume -like "*$DatastoreName*" -and $DatastoreName.Length -gt 3) {
+                        $SnapMirrorRelations += $Relation
+                        break  # Take first pattern match to avoid duplicates
+                    }
                 }
             }
             
@@ -395,7 +402,13 @@ function Update-SnapMirrorRelationships {
             }
         }
         catch {
-            Write-Log "Failed to process SnapMirror relationships for datastore ${DatastoreName}: ${_}" -Level "ERROR"
+            $ErrorMessage = $_.Exception.Message
+            $Prefix = if ($WhatIf) { "[WHATIF] " } else { "" }
+            Write-Log "${Prefix}Failed to process SnapMirror relationships for datastore ${DatastoreName}" -Level "ERROR"
+            Write-Log "${Prefix}Error details: ${ErrorMessage}" -Level "ERROR"
+            
+            # Continue processing other datastores even if one fails
+            continue
         }
     }
     
@@ -446,14 +459,45 @@ function Mount-TargetDatastores {
                 
                 $NFSExportPath = "/$($Volume.Name)"
                 
-                # Get NFS server address
+                # Get NFS server address with improved interface discovery
                 $AllNFSInterfaces = Get-NcNetInterface -VserverContext $TargetNFSSVM -ErrorAction Stop
+                $Prefix = if ($WhatIf) { "[WHATIF] " } else { "" }
+                
+                Write-Log "${Prefix}Found $($AllNFSInterfaces.Count) network interfaces for SVM: ${TargetNFSSVM}" -Level "INFO"
+                
+                # Try multiple criteria to find NFS interface
+                $NFSInterface = $null
+                
+                # First try: Look for data role with NFS protocol
                 $NFSInterface = $AllNFSInterfaces | Where-Object { 
                     $_.Role -eq "data" -and $_.DataProtocols -contains "nfs" 
                 } | Select-Object -First 1
                 
+                # Second try: Look for data role with NFS in protocol list (case variations)
+                if (-not $NFSInterface) {
+                    $NFSInterface = $AllNFSInterfaces | Where-Object { 
+                        $_.Role -eq "data" -and ($_.DataProtocols -match "nfs" -or $_.DataProtocols -match "NFS")
+                    } | Select-Object -First 1
+                }
+                
+                # Third try: Look for any interface with NFS (regardless of role)
+                if (-not $NFSInterface) {
+                    $NFSInterface = $AllNFSInterfaces | Where-Object { 
+                        $_.DataProtocols -contains "nfs" -or $_.DataProtocols -match "nfs"
+                    } | Select-Object -First 1
+                }
+                
+                # Fourth try: Look for data interfaces (assume NFS capable)
+                if (-not $NFSInterface) {
+                    $NFSInterface = $AllNFSInterfaces | Where-Object { 
+                        $_.Role -eq "data" -and $_.AdminStatus -eq "up"
+                    } | Select-Object -First 1
+                }
+                
                 if ($NFSInterface) {
                     $NFSServer = $NFSInterface.Address
+                    Write-Log "${Prefix}Selected NFS interface: $($NFSInterface.InterfaceName) ($($NFSInterface.Address)) - Role: $($NFSInterface.Role), Protocols: $($NFSInterface.DataProtocols -join ',')" -Level "SUCCESS"
+                    
                     $MountPrefix = if ($WhatIf) { "[WHATIF] Would mount" } else { "Mounting" }
                     Write-Log "${MountPrefix} NFS datastore: ${DatastoreName} from ${NFSServer}:${NFSExportPath}" -Level "INFO"
                     
@@ -468,7 +512,11 @@ function Mount-TargetDatastores {
                     
                     $MountedDatastores += $DatastoreName
                 } else {
-                    Write-Log "${Prefix}Could not find NFS data interface for SVM: ${TargetNFSSVM}" -Level "ERROR"
+                    Write-Log "${Prefix}Could not find suitable NFS interface for SVM: ${TargetNFSSVM}" -Level "ERROR"
+                    Write-Log "${Prefix}Available interfaces:" -Level "INFO"
+                    foreach ($Interface in $AllNFSInterfaces) {
+                        Write-Log "${Prefix}  - $($Interface.InterfaceName): $($Interface.Address) (Role: $($Interface.Role), Protocols: $($Interface.DataProtocols -join ','), Status: $($Interface.AdminStatus))" -Level "INFO"
+                    }
                 }
             } else {
                 Write-Log "${Prefix}Could not find matching volume for datastore: ${DatastoreName}" -Level "ERROR"
