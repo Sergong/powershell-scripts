@@ -666,7 +666,7 @@ function Register-TargetVMs {
     
     # Prompt for confirmation before registering VMs
     if (-not $WhatIf) {
-        Write-Host "`nReady to register $($script:MigrationData.Count) VMs in target vCenter." -ForegroundColor Yellow
+        Write-Host "`nReady to register $($script:MigrationData.Count) VMs in target cluster '${TargetCluster}'." -ForegroundColor Yellow
         Write-Host "This will make the VMs visible in the target environment but they will remain powered off." -ForegroundColor Yellow
         $Confirmation = Read-Host "Continue with VM registration? (y/N)"
         if ($Confirmation -ne 'y' -and $Confirmation -ne 'Y') {
@@ -713,14 +713,15 @@ function Register-TargetVMs {
                 
                 Write-Log "Registering VM: $($VM.VMName) from datastore ${VMDatastore}, path: ${VMXPath}" -Level "INFO"
                 
-                # Get target cluster and select a host for registration
+                # Get target cluster and select a random host for registration
                 $Cluster = Get-Cluster -Server $script:TargetVIServer -Name $TargetCluster -ErrorAction Stop
-                $TargetHost = Get-VMHost -Location $Cluster -Server $script:TargetVIServer | Select-Object -First 1
+                $AllHosts = Get-VMHost -Location $Cluster -Server $script:TargetVIServer
+                $TargetHost = $AllHosts | Get-Random
                 
                 Write-Log "Registering VM to cluster: ${TargetCluster}, host: $($TargetHost.Name)" -Level "INFO"
                 
-                # Register the VM
-                $RegisteredVM = New-VM -VMFilePath $VMXPath -VMHost $TargetHost -Location $Cluster
+                # Register the VM (location will be determined by the host's cluster)
+                $RegisteredVM = New-VM -VMFilePath $VMXPath -VMHost $TargetHost
                 
                 $RegisteredVMs += $VM.VMName
                 Write-Log "Successfully registered VM: $($VM.VMName)" -Level "SUCCESS"
