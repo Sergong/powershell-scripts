@@ -604,32 +604,31 @@ function Register-TargetVMs {
                 $RegisteredVMs += $VM.VMName
                 Write-Log "Successfully registered VM: $($VM.VMName)" -Level "SUCCESS"
             } else {
-                # WhatIf simulation - don't attempt actual operations
+                # WhatIf simulation - completely avoid real operations
                 $VMXPath = "[${VMDatastore}] $($VM.VMName)/$($VM.VMName).vmx"
                 
-                # Simulate cluster and host selection for logging
-                try {
-                    $Cluster = Get-Cluster -Server $script:TargetVIServer -Name $TargetCluster -ErrorAction Stop
-                    $TargetHost = Get-VMHost -Location $Cluster -Server $script:TargetVIServer | Select-Object -First 1
-                    
-                    Write-Log "[WHATIF] Would register VM: $($VM.VMName) from datastore: ${VMDatastore}" -Level "INFO"
-                    Write-Log "[WHATIF] Would use path: ${VMXPath}" -Level "INFO"
-                    Write-Log "[WHATIF] Would register to cluster: ${TargetCluster}, host: $($TargetHost.Name)" -Level "INFO"
-                    
-                    # Simulate successful registration
-                    $RegisteredVMs += $VM.VMName
-                    Write-Log "[WHATIF] Would successfully register VM: $($VM.VMName)" -Level "SUCCESS"
-                }
-                catch {
-                    Write-Log "[WHATIF] ERROR: Could not validate cluster ${TargetCluster} for VM registration simulation" -Level "ERROR"
-                }
+                Write-Log "[WHATIF] Would register VM: $($VM.VMName) from datastore: ${VMDatastore}" -Level "INFO"
+                Write-Log "[WHATIF] Would use path: ${VMXPath}" -Level "INFO"
+                Write-Log "[WHATIF] Would register to cluster: ${TargetCluster}" -Level "INFO"
+                Write-Log "[WHATIF] Would select appropriate host from cluster for registration" -Level "INFO"
+                
+                # Simulate successful registration without any real validation
+                $RegisteredVMs += $VM.VMName
+                Write-Log "[WHATIF] Would successfully register VM: $($VM.VMName)" -Level "SUCCESS"
             }
         }
         catch {
             if (-not $WhatIf) {
+                # Real mode - show actual errors
                 Write-Log "Failed to register VM $($VM.VMName): ${_}" -Level "ERROR"
             } else {
-                Write-Log "[WHATIF] Simulation error for VM $($VM.VMName): ${_}" -Level "WARNING"
+                # WhatIf mode - this shouldn't happen since we avoid all real operations
+                # If we get here, it's likely a bug in the WhatIf simulation logic
+                Write-Log "[WHATIF] Unexpected simulation error for VM $($VM.VMName) - this should not occur in WhatIf mode" -Level "WARNING"
+                
+                # Continue with simulation anyway
+                $RegisteredVMs += $VM.VMName
+                Write-Log "[WHATIF] Continuing simulation - would register VM: $($VM.VMName)" -Level "INFO"
             }
         }
     }
