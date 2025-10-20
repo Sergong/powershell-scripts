@@ -28,6 +28,9 @@
 .PARAMETER TargetNFSSVM
     Name of the target NFS SVM on the ONTAP cluster.
 
+.PARAMETER TargetCluster
+    Name of the target vSphere cluster where VMs will be migrated and datastores will be mounted.
+
 .PARAMETER LogPath
     Path where log files will be written. Default is current directory with timestamp.
 
@@ -38,10 +41,10 @@
     Shows what would be done without making any changes.
 
 .EXAMPLE
-    .\Invoke-VMigration.ps1 -CSVPath "C:\VMMigration.csv" -SourcevCenter "vcenter7.domain.com" -TargetvCenter "vcenter8.domain.com" -TargetONTAPCluster "ontap-cluster.domain.com" -TargetNFSSVM "nfs_svm" -WhatIf
+    .\Invoke-VMigration.ps1 -CSVPath "C:\VMMigration.csv" -SourcevCenter "vcenter7.domain.com" -TargetvCenter "vcenter8.domain.com" -TargetONTAPCluster "ontap-cluster.domain.com" -TargetNFSSVM "nfs_svm" -TargetCluster "Production-Cluster" -WhatIf
 
 .EXAMPLE
-    .\Invoke-VMigration.ps1 -CSVPath "VMs.csv" -SourcevCenter "source-vc.domain.com" -TargetvCenter "target-vc.domain.com" -TargetONTAPCluster "target-ontap.domain.com" -TargetNFSSVM "migration_svm"
+    .\Invoke-VMigration.ps1 -CSVPath "VMs.csv" -SourcevCenter "source-vc.domain.com" -TargetvCenter "target-vc.domain.com" -TargetONTAPCluster "target-ontap.domain.com" -TargetNFSSVM "migration_svm" -TargetCluster "Migration-Cluster"
 
 .NOTES
     Author: PowerShell Automation
@@ -74,6 +77,9 @@ param(
     
     [Parameter(Mandatory = $true)]
     [string]$TargetNFSSVM,
+    
+    [Parameter(Mandatory = $true)]
+    [string]$TargetCluster,
     
     [Parameter(Mandatory = $false)]
     [string]$LogPath = ".\VMMigration_$(Get-Date -Format 'yyyyMMdd_HHmmss').log",
@@ -227,6 +233,15 @@ function Connect-Infrastructure {
         Write-Log "Successfully connected to ONTAP Cluster" -Level "SUCCESS"
         if ($WhatIf) {
             Write-Log "[WHATIF] Connected for discovery only - no changes will be made to ONTAP cluster" -Level "INFO"
+        }
+        
+        # Validate target cluster exists
+        Write-Log "Validating target vSphere cluster: ${TargetCluster}" -Level "INFO"
+        $TargetClusterObj = Get-Cluster -Server $script:TargetVIServer -Name $TargetCluster -ErrorAction Stop
+        $ClusterHosts = Get-VMHost -Location $TargetClusterObj -Server $script:TargetVIServer
+        Write-Log "Target cluster '${TargetCluster}' validated successfully ($($ClusterHosts.Count) hosts)" -Level "SUCCESS"
+        if ($WhatIf) {
+            Write-Log "[WHATIF] Cluster validation complete - ready for migration simulation" -Level "INFO"
         }
         
         return $true
@@ -502,11 +517,25 @@ function Mount-TargetDatastores {
                     Write-Log "${MountPrefix} NFS datastore: ${DatastoreName} from ${NFSServer}:${NFSExportPath}" -Level "INFO"
                     
                     if (-not $WhatIf) {
-                        # Get target cluster hosts and mount datastores (write operations)
-                        $VMHosts = Get-VMHost -Server $script:TargetVIServer
+                        # Get target cluster and its hosts for datastore mounting
+                        $Cluster = Get-Cluster -Server $script:TargetVIServer -Name $TargetCluster -ErrorAction Stop
+                        $VMHosts = Get-VMHost -Location $Cluster -Server $script:TargetVIServer
+                        
+                        Write-Log "Mounting datastore on $($VMHosts.Count) hosts in cluster: ${TargetCluster}" -Level "INFO"
+                        
                         foreach ($VMHost in $VMHosts) {
                             $NewDatastore = New-Datastore -VMHost $VMHost -Name $DatastoreName -Nfs -NfsHost $NFSServer -Path $NFSExportPath
                             Write-Log "Mounted NFS datastore ${DatastoreName} on host $($VMHost.Name)" -Level "SUCCESS"
+                        }
+                    } else {
+                        # For WhatIf, still validate cluster exists and show host count
+                        try {
+                            $Cluster = Get-Cluster -Server $script:TargetVIServer -Name $TargetCluster -ErrorAction Stop
+                            $VMHosts = Get-VMHost -Location $Cluster -Server $script:TargetVIServer
+                            Write-Log "[WHATIF] Would mount datastore on $($VMHosts.Count) hosts in cluster: ${TargetCluster}" -Level "INFO"
+                        }
+                        catch {
+                            Write-Log "[WHATIF] ERROR: Target cluster '${TargetCluster}' not found or inaccessible" -Level "ERROR"
                         }
                     }
                     
@@ -562,11 +591,14 @@ function Register-TargetVMs {
                 
                 Write-Log "Registering VM: $($VM.VMName) from datastore ${VMDatastore}, path: ${VMXPath}" -Level "INFO"
                 
-                # Get a target host for registration
-                $TargetHost = Get-VMHost -Server $script:TargetVIServer | Select-Object -First 1
+                # Get target cluster and select a host for registration
+                $Cluster = Get-Cluster -Server $script:TargetVIServer -Name $TargetCluster -ErrorAction Stop
+                $TargetHost = Get-VMHost -Location $Cluster -Server $script:TargetVIServer | Select-Object -First 1
+                
+                Write-Log "Registering VM to cluster: ${TargetCluster}, host: $($TargetHost.Name)" -Level "INFO"
                 
                 # Register the VM
-                $RegisteredVM = New-VM -VMFilePath $VMXPath -VMHost $TargetHost -Location (Get-Folder -Server $script:TargetVIServer -Name "vm")
+                $RegisteredVM = New-VM -VMFilePath $VMXPath -VMHost $TargetHost -Location $Cluster
                 
                 $RegisteredVMs += $VM.VMName
                 Write-Log "Successfully registered VM: $($VM.VMName)" -Level "SUCCESS"
@@ -871,6 +903,7 @@ function Write-MigrationSummary {
 Write-Log "Starting VM Migration Process..." -Level "INFO"
 Write-Log "Source vCenter: ${SourcevCenter}" -Level "INFO"
 Write-Log "Target vCenter: ${TargetvCenter}" -Level "INFO"
+Write-Log "Target vSphere Cluster: ${TargetCluster}" -Level "INFO"
 Write-Log "Target ONTAP Cluster: ${TargetONTAPCluster}" -Level "INFO"
 Write-Log "Target NFS SVM: ${TargetNFSSVM}" -Level "INFO"
 Write-Log "CSV Path: ${CSVPath}" -Level "INFO"
