@@ -334,13 +334,31 @@ function Update-SnapMirrorRelationships {
     foreach ($DatastoreName in $Datastores.Keys) {
         try {
             # Always discover SnapMirror relationships (read-only operation)
-            $SnapMirrorRelations = Get-NcSnapmirror -DestinationVserver $TargetNFSSVM | Where-Object { 
-                $_.DestinationVolume -like "*$DatastoreName*" 
+            $AllSnapMirrorRelations = Get-NcSnapmirror -DestinationVserver $TargetNFSSVM -ErrorAction Stop
+            
+            # Filter relationships for this datastore with multiple pattern matching attempts
+            $SnapMirrorRelations = @()
+            foreach ($Relation in $AllSnapMirrorRelations) {
+                # Try exact match first
+                if ($Relation.DestinationVolume -eq $DatastoreName) {
+                    $SnapMirrorRelations += $Relation
+                }
+                # Try pattern matching
+                elseif ($Relation.DestinationVolume -like "*$DatastoreName*") {
+                    $SnapMirrorRelations += $Relation
+                }
+                # Try reverse pattern (datastore name might be part of volume name)
+                elseif ($DatastoreName -like "*$($Relation.DestinationVolume)*") {
+                    $SnapMirrorRelations += $Relation
+                }
             }
             
+            $Prefix = if ($WhatIf) { "[WHATIF] " } else { "" }
+            Write-Log "${Prefix}Found $($AllSnapMirrorRelations.Count) total SnapMirror relationships, $($SnapMirrorRelations.Count) matching datastore: ${DatastoreName}" -Level "INFO"
+            
             if ($SnapMirrorRelations.Count -eq 0) {
-                $Prefix = if ($WhatIf) { "[WHATIF] " } else { "" }
                 Write-Log "${Prefix}No SnapMirror relationships found for datastore: ${DatastoreName}" -Level "WARNING"
+                Write-Log "${Prefix}Available destination volumes: $($AllSnapMirrorRelations.DestinationVolume -join ', ')" -Level "INFO"
                 continue
             }
             
@@ -398,32 +416,63 @@ function Mount-TargetDatastores {
     foreach ($DatastoreName in $Datastores.Keys) {
         try {
             # Always discover volumes and NFS servers (read-only operations)
-            $Volume = Get-NcVol -VserverContext $TargetNFSSVM | Where-Object { 
-                $_.Name -like "*$DatastoreName*" 
-            } | Select-Object -First 1
+            $AllVolumes = Get-NcVol -VserverContext $TargetNFSSVM -ErrorAction Stop
+            
+            # Find matching volume with multiple pattern attempts
+            $Volume = $null
+            foreach ($Vol in $AllVolumes) {
+                # Try exact match first
+                if ($Vol.Name -eq $DatastoreName) {
+                    $Volume = $Vol
+                    break
+                }
+                # Try pattern matching
+                elseif ($Vol.Name -like "*$DatastoreName*") {
+                    $Volume = $Vol
+                    break
+                }
+                # Try reverse pattern (datastore name might be part of volume name)
+                elseif ($DatastoreName -like "*$($Vol.Name)*") {
+                    $Volume = $Vol
+                    break
+                }
+            }
+            
+            $Prefix = if ($WhatIf) { "[WHATIF] " } else { "" }
+            Write-Log "${Prefix}Searched $($AllVolumes.Count) volumes for datastore: ${DatastoreName}" -Level "INFO"
             
             if ($Volume) {
+                Write-Log "${Prefix}Found matching volume: $($Volume.Name) for datastore: ${DatastoreName}" -Level "SUCCESS"
+                
                 $NFSExportPath = "/$($Volume.Name)"
-                $NFSServer = (Get-NcNetInterface -VserverContext $TargetNFSSVM | Where-Object { 
+                
+                # Get NFS server address
+                $AllNFSInterfaces = Get-NcNetInterface -VserverContext $TargetNFSSVM -ErrorAction Stop
+                $NFSInterface = $AllNFSInterfaces | Where-Object { 
                     $_.Role -eq "data" -and $_.DataProtocols -contains "nfs" 
-                } | Select-Object -First 1).Address
+                } | Select-Object -First 1
                 
-                $Prefix = if ($WhatIf) { "[WHATIF] Would mount" } else { "Mounting" }
-                Write-Log "${Prefix} NFS datastore: ${DatastoreName} from ${NFSServer}:${NFSExportPath}" -Level "INFO"
-                
-                if (-not $WhatIf) {
-                    # Get target cluster hosts and mount datastores (write operations)
-                    $VMHosts = Get-VMHost -Server $script:TargetVIServer
-                    foreach ($VMHost in $VMHosts) {
-                        $NewDatastore = New-Datastore -VMHost $VMHost -Name $DatastoreName -Nfs -NfsHost $NFSServer -Path $NFSExportPath
-                        Write-Log "Mounted NFS datastore ${DatastoreName} on host $($VMHost.Name)" -Level "SUCCESS"
+                if ($NFSInterface) {
+                    $NFSServer = $NFSInterface.Address
+                    $MountPrefix = if ($WhatIf) { "[WHATIF] Would mount" } else { "Mounting" }
+                    Write-Log "${MountPrefix} NFS datastore: ${DatastoreName} from ${NFSServer}:${NFSExportPath}" -Level "INFO"
+                    
+                    if (-not $WhatIf) {
+                        # Get target cluster hosts and mount datastores (write operations)
+                        $VMHosts = Get-VMHost -Server $script:TargetVIServer
+                        foreach ($VMHost in $VMHosts) {
+                            $NewDatastore = New-Datastore -VMHost $VMHost -Name $DatastoreName -Nfs -NfsHost $NFSServer -Path $NFSExportPath
+                            Write-Log "Mounted NFS datastore ${DatastoreName} on host $($VMHost.Name)" -Level "SUCCESS"
+                        }
                     }
+                    
+                    $MountedDatastores += $DatastoreName
+                } else {
+                    Write-Log "${Prefix}Could not find NFS data interface for SVM: ${TargetNFSSVM}" -Level "ERROR"
                 }
-                
-                $MountedDatastores += $DatastoreName
             } else {
-                $Prefix = if ($WhatIf) { "[WHATIF] " } else { "" }
                 Write-Log "${Prefix}Could not find matching volume for datastore: ${DatastoreName}" -Level "ERROR"
+                Write-Log "${Prefix}Available volumes: $($AllVolumes.Name -join ', ')" -Level "INFO"
             }
         }
         catch {
