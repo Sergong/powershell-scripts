@@ -283,55 +283,44 @@ function Get-SourceDatastores {
     return $DiscoveredDatastores
 }
 
-function Stop-SourceVMs {
+function Verify-SourceVMsShutdown {
     [CmdletBinding()]
     param()
     
-    Write-Log "Step 2: Powering off VMs in source vCenter..." -Level "INFO"
+    Write-Log "Step 2: Verifying VMs are powered off in source vCenter..." -Level "INFO"
     
-    $StoppedVMs = @()
+    $VerifiedVMs = @()
+    $PoweredOnVMs = @()
     
     foreach ($VM in $script:MigrationData) {
         try {
-            if (-not $WhatIf) {
-                $VMObject = Get-VM -Server $script:SourceVIServer -Name $VM.VMName -ErrorAction Stop
-                
-                if ($VMObject.PowerState -eq "PoweredOn") {
-                    Write-Log "Shutting down VM: $($VM.VMName)" -Level "INFO"
-                    $VMObject | Shutdown-VMGuest -Confirm:$false | Out-Null
-                    
-                    # Wait for graceful shutdown with timeout
-                    $Timeout = 300 # 5 minutes
-                    $Timer = 0
-                    do {
-                        Start-Sleep -Seconds 10
-                        $Timer += 10
-                        $VMObject = Get-VM -Server $script:SourceVIServer -Name $VM.VMName
-                        Write-Log "Waiting for VM $($VM.VMName) to shut down... ($Timer/$Timeout seconds)" -Level "INFO"
-                    } while ($VMObject.PowerState -eq "PoweredOn" -and $Timer -lt $Timeout)
-                    
-                    # Force power off if graceful shutdown failed
-                    if ($VMObject.PowerState -eq "PoweredOn") {
-                        Write-Log "Graceful shutdown timeout reached. Force powering off VM: $($VM.VMName)" -Level "WARNING"
-                        $VMObject | Stop-VM -Confirm:$false | Out-Null
-                    }
-                    
-                    $StoppedVMs += $VM.VMName
-                    Write-Log "VM $($VM.VMName) powered off successfully" -Level "SUCCESS"
-                } else {
-                    Write-Log "VM $($VM.VMName) is already powered off" -Level "INFO"
-                }
+            $Prefix = if ($WhatIf) { "[WHATIF] " } else { "" }
+            $VMObject = Get-VM -Server $script:SourceVIServer -Name $VM.VMName -ErrorAction Stop
+            
+            if ($VMObject.PowerState -eq "PoweredOff") {
+                Write-Log "${Prefix}VM $($VM.VMName) is powered off - ready for migration" -Level "SUCCESS"
+                $VerifiedVMs += $VM.VMName
             } else {
-                Write-Log "[WHATIF] Would power off VM: $($VM.VMName)" -Level "INFO"
+                Write-Log "${Prefix}WARNING: VM $($VM.VMName) is still powered on (State: $($VMObject.PowerState))" -Level "ERROR"
+                $PoweredOnVMs += $VM.VMName
             }
         }
         catch {
-            Write-Log "Failed to power off VM $($VM.VMName): ${_}" -Level "ERROR"
+            Write-Log "Failed to check power state of VM $($VM.VMName): ${_}" -Level "ERROR"
         }
     }
     
-    Write-Log "Completed powering off VMs. Successfully stopped: $($StoppedVMs.Count)" -Level "SUCCESS"
-    return $StoppedVMs
+    if ($PoweredOnVMs.Count -gt 0) {
+        Write-Log "ERROR: $($PoweredOnVMs.Count) VMs are still powered on. Please shut down these VMs before proceeding: $($PoweredOnVMs -join ', ')" -Level "ERROR"
+        if (-not $WhatIf) {
+            throw "Migration cannot continue - VMs must be powered off first"
+        }
+    }
+    
+    $LogLevel = if ($WhatIf) { "INFO" } else { "SUCCESS" }
+    $Prefix = if ($WhatIf) { "[WHATIF] " } else { "" }
+    Write-Log "${Prefix}Verification complete. $($VerifiedVMs.Count) VMs confirmed powered off" -Level $LogLevel
+    return $VerifiedVMs
 }
 
 function Update-SnapMirrorRelationships {
@@ -505,56 +494,94 @@ function Start-TargetVMs {
     [CmdletBinding()]
     param()
     
-    Write-Log "Step 6: Powering on VMs and answering relocation questions..." -Level "INFO"
-    
-    # Prompt for confirmation before starting VMs
-    if (-not $WhatIf) {
-        Write-Host "`nReady to power on $($script:MigrationData.Count) VMs in target environment." -ForegroundColor Yellow
-        Write-Host "This will start the VMs and make them active on the target cluster." -ForegroundColor Yellow
-        Write-Host "WARNING: This is the point of no return - VMs will be running on the target environment." -ForegroundColor Red
-        $Confirmation = Read-Host "Continue with powering on VMs? (y/N)"
-        if ($Confirmation -ne 'y' -and $Confirmation -ne 'Y') {
-            Write-Log "VM startup cancelled by user" -Level "WARNING"
-            return @()
-        }
-        Write-Log "User confirmed VM startup. Proceeding with power on operations..." -Level "INFO"
-    }
+    Write-Log "Step 6: Powering on VMs in sequential order with individual confirmation..." -Level "INFO"
     
     $StartedVMs = @()
+    $VMCount = $script:MigrationData.Count
+    $CurrentVM = 0
+    
+    if (-not $WhatIf) {
+        Write-Host "`nVMs will be powered on in the order specified in the CSV file." -ForegroundColor Yellow
+        Write-Host "You will be prompted to confirm each VM individually." -ForegroundColor Yellow
+        Write-Host "Press Ctrl+C at any time to abort the remaining VM startups.`n" -ForegroundColor Cyan
+    }
     
     foreach ($VM in $script:MigrationData) {
+        $CurrentVM++
+        
         try {
             if (-not $WhatIf) {
+                # Individual confirmation for each VM
+                Write-Host "VM $CurrentVM of ${VMCount}: $($VM.VMName)" -ForegroundColor White -BackgroundColor DarkBlue
+                $Confirmation = Read-Host "Power on VM '$($VM.VMName)' now? (y/N/s=skip)"
+                
+                if ($Confirmation -eq 's' -or $Confirmation -eq 'S') {
+                    Write-Log "VM $($VM.VMName) skipped by user" -Level "WARNING"
+                    continue
+                } elseif ($Confirmation -ne 'y' -and $Confirmation -ne 'Y') {
+                    Write-Log "VM startup process cancelled by user at VM: $($VM.VMName)" -Level "WARNING"
+                    break
+                }
+                
                 $VMObject = Get-VM -Server $script:TargetVIServer -Name $VM.VMName -ErrorAction Stop
                 
-                Write-Log "Powering on VM: $($VM.VMName)" -Level "INFO"
+                Write-Log "Powering on VM $CurrentVM of ${VMCount}: $($VM.VMName)" -Level "INFO"
                 Start-VM -VM $VMObject -Confirm:$false | Out-Null
                 
                 # Wait for VM to start and check for questions
+                Write-Host "  Waiting for VM to start..." -ForegroundColor Gray
                 Start-Sleep -Seconds 30
                 
                 # Check for and answer VM questions (I moved it)
                 $VMView = Get-View -VIObject $VMObject
                 if ($VMView.Runtime.Question) {
                     Write-Log "Answering VM question for $($VM.VMName): I moved it" -Level "INFO"
+                    Write-Host "  Answering relocation question..." -ForegroundColor Gray
                     $VMView.AnswerVM($VMView.Runtime.Question.Id, "0") # "0" typically means "I moved it"
                 }
                 
                 # Allow VM to complete startup
+                Write-Host "  Allowing VM to complete startup..." -ForegroundColor Gray
                 Start-Sleep -Seconds 15
                 
-                $StartedVMs += $VM.VMName  
-                Write-Log "Successfully started VM: $($VM.VMName)" -Level "SUCCESS"
+                # Verify VM is running
+                $VMObject = Get-VM -Server $script:TargetVIServer -Name $VM.VMName
+                if ($VMObject.PowerState -eq "PoweredOn") {
+                    Write-Host "  VM $($VM.VMName) started successfully" -ForegroundColor Green
+                    $StartedVMs += $VM.VMName  
+                    Write-Log "Successfully started VM $CurrentVM of ${VMCount}: $($VM.VMName)" -Level "SUCCESS"
+                } else {
+                    Write-Host "  WARNING: VM $($VM.VMName) may not have started properly (State: $($VMObject.PowerState))" -ForegroundColor Red
+                    Write-Log "VM $($VM.VMName) startup completed but state is: $($VMObject.PowerState)" -Level "WARNING"
+                }
+                
+                # Brief pause before next VM
+                if ($CurrentVM -lt $VMCount) {
+                    Write-Host "  Brief pause before next VM...`n" -ForegroundColor Gray
+                    Start-Sleep -Seconds 5
+                }
+                
             } else {
-                Write-Log "[WHATIF] Would power on VM: $($VM.VMName) and answer relocation question" -Level "INFO"
+                Write-Log "[WHATIF] Would prompt to power on VM $CurrentVM of ${VMCount}: $($VM.VMName)" -Level "INFO"
+                $StartedVMs += $VM.VMName
             }
         }
         catch {
             Write-Log "Failed to start VM $($VM.VMName): ${_}" -Level "ERROR"
+            Write-Host "  ERROR: Failed to start VM $($VM.VMName)" -ForegroundColor Red
+            
+            if (-not $WhatIf) {
+                $ContinueOnError = Read-Host "Continue with remaining VMs? (y/N)"
+                if ($ContinueOnError -ne 'y' -and $ContinueOnError -ne 'Y') {
+                    Write-Log "VM startup process aborted after error with $($VM.VMName)" -Level "ERROR"
+                    break
+                }
+            }
         }
     }
     
-    Write-Log "Completed powering on VMs. Successfully started: $($StartedVMs.Count)" -Level "SUCCESS"
+    $LogLevel = if ($WhatIf) { "INFO" } else { "SUCCESS" }
+    Write-Log "VM startup process completed. Successfully started: $($StartedVMs.Count) of $VMCount VMs" -Level $LogLevel
     return $StartedVMs
 }
 
@@ -776,7 +803,7 @@ try {
         exit 1
     }
     
-    $StoppedVMs = Stop-SourceVMs
+    $VerifiedVMs = Verify-SourceVMsShutdown
     $ProcessedVolumes = Update-SnapMirrorRelationships -Datastores $Datastores
     $MountedDatastores = Mount-TargetDatastores -Datastores $Datastores
     $RegisteredVMs = Register-TargetVMs
