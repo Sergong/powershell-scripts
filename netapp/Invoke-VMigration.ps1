@@ -789,14 +789,32 @@ function Start-TargetVMs {
                 
                 # Wait for VM to start and check for questions
                 Write-Host "  Waiting for VM to start..." -ForegroundColor Gray
-                Start-Sleep -Seconds 30
+                Start-Sleep -Seconds 5
                 
                 # Check for and answer VM questions (I moved it)
                 $VMView = Get-View -VIObject $VMObject
                 if ($VMView.Runtime.Question) {
-                    Write-Log "Answering VM question for $($VM.VMName): I moved it" -Level "INFO"
+                    $Question = $VMView.Runtime.Question
+                    Write-Log "VM question detected for $($VM.VMName): $($Question.Text)" -Level "INFO"
                     Write-Host "  Answering relocation question..." -ForegroundColor Gray
-                    $VMView.AnswerVM($VMView.Runtime.Question.Id, "0") # "0" typically means "I moved it"
+                    
+                    try {
+                        # vSphere 8 compatible approach - try multiple methods
+                        if ($Question.Choice -and $Question.Choice.ChoiceInfo) {
+                            # Method 1: Use the first choice key (typically "I moved it")
+                            $AnswerKey = $Question.Choice.ChoiceInfo[0].Key
+                            Write-Log "Using answer key: $AnswerKey for question: $($Question.Text)" -Level "INFO"
+                            $VMView.AnswerVM($Question.Id, $AnswerKey)
+                        } else {
+                            # Method 2: Try with default answer index
+                            Write-Log "Using default answer index 0 for question: $($Question.Text)" -Level "INFO"
+                            $VMView.AnswerVM($Question.Id, 0)
+                        }
+                        Write-Log "Successfully answered VM question for $($VM.VMName)" -Level "SUCCESS"
+                    } catch {
+                        Write-Log "Failed to answer VM question for $($VM.VMName): $($_.Exception.Message)" -Level "WARNING"
+                        Write-Host "  Warning: Could not answer VM question automatically" -ForegroundColor Yellow
+                    }
                 }
                 
                 # Allow VM to complete startup
