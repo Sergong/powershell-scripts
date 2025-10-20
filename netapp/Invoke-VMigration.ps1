@@ -362,8 +362,8 @@ function Update-SnapMirrorRelationships {
             }
             
             if ($AllSnapMirrorRelations.Count -eq 0) {
-                Write-Log "${Prefix}Method 2 returned 0 relationships, trying method 3: Get-NcSnapmirror with wildcard" -Level "INFO"
-                $AllSnapMirrorRelations = Get-NcSnapmirror -DestinationPath "${TargetNFSSVM}:*" -ErrorAction SilentlyContinue
+                Write-Log "${Prefix}Method 2 returned 0 relationships, trying method 3: Get-NcSnapmirror (all)" -Level "INFO"
+                $AllSnapMirrorRelations = Get-NcSnapmirror -ErrorAction SilentlyContinue | Where-Object { $_.DestinationLocation -like "${TargetNFSSVM}:*" }
             }
             
             # Debug: Show ALL properties of the first SnapMirror relationship
@@ -405,10 +405,6 @@ function Update-SnapMirrorRelationships {
                 elseif ($Relation.DestinationVolume) {
                     $VolumeToCompare = $Relation.DestinationVolume
                 }
-                # Fallback to DestinationPath if available
-                elseif ($Relation.DestinationPath) {
-                    $VolumeToCompare = ($Relation.DestinationPath -split ':')[-1]
-                }
                 
                 # Try exact match first (most reliable)
                 Write-Log "${Prefix}Debug - Comparing '$VolumeToCompare' with '$DatastoreName'" -Level "INFO"
@@ -431,10 +427,6 @@ function Update-SnapMirrorRelationships {
                     # Fallback to DestinationVolume if available
                     elseif ($Relation.DestinationVolume) {
                         $VolumeToCompare = $Relation.DestinationVolume
-                    }
-                    # Fallback to DestinationPath if available
-                    elseif ($Relation.DestinationPath) {
-                        $VolumeToCompare = ($Relation.DestinationPath -split ':')[-1]
                     }
                     
                     # Only try pattern matching if datastore name is substantial part of volume name
