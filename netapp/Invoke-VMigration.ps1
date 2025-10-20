@@ -352,23 +352,33 @@ function Update-SnapMirrorRelationships {
             $Prefix = if ($WhatIf) { "[WHATIF] " } else { "" }
             Write-Log "${Prefix}Querying SnapMirror relationships for SVM: ${TargetNFSSVM}" -Level "INFO"
             
+            # Try multiple methods to get SnapMirror relationships
+            Write-Log "${Prefix}Attempting method 1: Get-NcSnapmirror -DestinationVserver" -Level "INFO"
             $AllSnapMirrorRelations = Get-NcSnapmirror -DestinationVserver $TargetNFSSVM -ErrorAction Stop
             
-            # Debug: Show all properties of the first SnapMirror relationship
+            if ($AllSnapMirrorRelations.Count -eq 0) {
+                Write-Log "${Prefix}Method 1 returned 0 relationships, trying method 2: Get-NcSnapmirror (all relationships)" -Level "INFO"
+                $AllSnapMirrorRelations = Get-NcSnapmirror -ErrorAction Stop | Where-Object { $_.DestinationVserver -eq $TargetNFSSVM }
+            }
+            
+            if ($AllSnapMirrorRelations.Count -eq 0) {
+                Write-Log "${Prefix}Method 2 returned 0 relationships, trying method 3: Get-NcSnapmirror with wildcard" -Level "INFO"
+                $AllSnapMirrorRelations = Get-NcSnapmirror -DestinationPath "${TargetNFSSVM}:*" -ErrorAction SilentlyContinue
+            }
+            
+            # Debug: Show ALL properties of the first SnapMirror relationship
             if ($AllSnapMirrorRelations.Count -gt 0) {
                 $FirstRelation = $AllSnapMirrorRelations[0]
-                Write-Log "${Prefix}Debug - First SnapMirror relationship properties:" -Level "INFO"
-                Write-Log "${Prefix}Debug - SourcePath: $($FirstRelation.SourcePath)" -Level "INFO"
-                Write-Log "${Prefix}Debug - DestinationPath: $($FirstRelation.DestinationPath)" -Level "INFO"
-                Write-Log "${Prefix}Debug - DestinationVolume: '$($FirstRelation.DestinationVolume)'" -Level "INFO"
-                Write-Log "${Prefix}Debug - DestinationVserver: '$($FirstRelation.DestinationVserver)'" -Level "INFO"
-                Write-Log "${Prefix}Debug - RelationshipType: '$($FirstRelation.RelationshipType)'" -Level "INFO"
+                Write-Log "${Prefix}Debug - First SnapMirror relationship ALL properties:" -Level "INFO"
                 
-                # Try to extract volume name from DestinationPath if DestinationVolume is empty
-                if ([string]::IsNullOrEmpty($FirstRelation.DestinationVolume) -and $FirstRelation.DestinationPath) {
-                    $VolumeName = ($FirstRelation.DestinationPath -split ':')[-1]
-                    Write-Log "${Prefix}Debug - Extracted volume name from path: '$VolumeName'" -Level "INFO"
+                # Get all properties and their values
+                $FirstRelation | Get-Member -MemberType Properties | ForEach-Object {
+                    $PropertyName = $_.Name
+                    $PropertyValue = $FirstRelation.$PropertyName
+                    Write-Log "${Prefix}Debug - $PropertyName`: '$PropertyValue'" -Level "INFO"
                 }
+                
+                Write-Log "${Prefix}Debug - --- End of properties ---" -Level "INFO"
             }
             
             # Filter relationships for this datastore with more precise matching
