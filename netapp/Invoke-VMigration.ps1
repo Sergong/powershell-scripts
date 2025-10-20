@@ -585,9 +585,23 @@ function Register-TargetVMs {
         try {
             $VMDatastore = $script:VMDatastoreMap[$VM.VMName]
             
+            # Debug logging to understand execution path
+            Write-Log "Processing VM: $($VM.VMName), WhatIf mode: $WhatIf, Datastore: ${VMDatastore}" -Level "INFO"
+            
             if (-not $WhatIf) {
-                # Real registration - verify datastore exists and register VM
-                $Datastore = Get-Datastore -Server $script:TargetVIServer -Name $VMDatastore -ErrorAction Stop
+                Write-Log "Entering REAL registration mode for VM: $($VM.VMName)" -Level "INFO"
+                
+                # Double-check WhatIf state before any real operations
+                if ($WhatIf) {
+                    Write-Log "[SAFETY] WhatIf detected during real mode check - switching to simulation" -Level "WARNING"
+                    # Jump to simulation
+                    $VMXPath = "[${VMDatastore}] $($VM.VMName)/$($VM.VMName).vmx"
+                    Write-Log "[WHATIF] Would register VM: $($VM.VMName) from datastore: ${VMDatastore}" -Level "INFO"
+                    $RegisteredVMs += $VM.VMName
+                    Write-Log "[WHATIF] Would successfully register VM: $($VM.VMName)" -Level "SUCCESS"
+                } else {
+                    # Real registration - verify datastore exists and register VM
+                    $Datastore = Get-Datastore -Server $script:TargetVIServer -Name $VMDatastore -ErrorAction Stop
                 $VMXPath = "[${VMDatastore}] $($VM.VMName)/$($VM.VMName).vmx"
                 
                 Write-Log "Registering VM: $($VM.VMName) from datastore ${VMDatastore}, path: ${VMXPath}" -Level "INFO"
@@ -603,7 +617,10 @@ function Register-TargetVMs {
                 
                 $RegisteredVMs += $VM.VMName
                 Write-Log "Successfully registered VM: $($VM.VMName)" -Level "SUCCESS"
+                }
             } else {
+                Write-Log "Entering WHATIF simulation mode for VM: $($VM.VMName)" -Level "INFO"
+                
                 # WhatIf simulation - completely avoid real operations
                 $VMXPath = "[${VMDatastore}] $($VM.VMName)/$($VM.VMName).vmx"
                 
