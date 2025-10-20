@@ -447,6 +447,16 @@ function Mount-TargetDatastores {
     
     Write-Log "Step 4: Mounting NFS datastores on target cluster..." -Level "INFO"
     
+    # Prompt for confirmation before mounting datastores
+    if (-not $WhatIf) {
+        Write-Log "About to mount $($Datastores.Count) NFS datastores on target cluster: ${TargetCluster}" -Level "WARNING"
+        $Confirmation = Read-Host "Continue with datastore mounting? (y/N)"
+        if ($Confirmation -ne 'y' -and $Confirmation -ne 'Y') {
+            Write-Log "Datastore mounting cancelled by user" -Level "WARNING"
+            return @()
+        }
+    }
+    
     $MountedDatastores = @()
     
     foreach ($DatastoreName in $Datastores.Keys) {
