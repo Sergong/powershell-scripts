@@ -354,16 +354,39 @@ function Update-SnapMirrorRelationships {
             
             $AllSnapMirrorRelations = Get-NcSnapmirror -DestinationVserver $TargetNFSSVM -ErrorAction Stop
             
+            # Debug: Show all properties of the first SnapMirror relationship
+            if ($AllSnapMirrorRelations.Count -gt 0) {
+                $FirstRelation = $AllSnapMirrorRelations[0]
+                Write-Log "${Prefix}Debug - First SnapMirror relationship properties:" -Level "INFO"
+                Write-Log "${Prefix}Debug - SourcePath: $($FirstRelation.SourcePath)" -Level "INFO"
+                Write-Log "${Prefix}Debug - DestinationPath: $($FirstRelation.DestinationPath)" -Level "INFO"
+                Write-Log "${Prefix}Debug - DestinationVolume: '$($FirstRelation.DestinationVolume)'" -Level "INFO"
+                Write-Log "${Prefix}Debug - DestinationVserver: '$($FirstRelation.DestinationVserver)'" -Level "INFO"
+                Write-Log "${Prefix}Debug - RelationshipType: '$($FirstRelation.RelationshipType)'" -Level "INFO"
+                
+                # Try to extract volume name from DestinationPath if DestinationVolume is empty
+                if ([string]::IsNullOrEmpty($FirstRelation.DestinationVolume) -and $FirstRelation.DestinationPath) {
+                    $VolumeName = ($FirstRelation.DestinationPath -split ':')[-1]
+                    Write-Log "${Prefix}Debug - Extracted volume name from path: '$VolumeName'" -Level "INFO"
+                }
+            }
+            
             # Filter relationships for this datastore with more precise matching
             $SnapMirrorRelations = @()
             Write-Log "${Prefix}Debug - Looking for datastore: '$DatastoreName'" -Level "INFO"
             Write-Log "${Prefix}Debug - Available destination volumes: $($AllSnapMirrorRelations.DestinationVolume -join ', ')" -Level "INFO"
             
             foreach ($Relation in $AllSnapMirrorRelations) {
+                # Get the volume name - try DestinationVolume first, then extract from DestinationPath
+                $VolumeToCompare = $Relation.DestinationVolume
+                if ([string]::IsNullOrEmpty($VolumeToCompare) -and $Relation.DestinationPath) {
+                    $VolumeToCompare = ($Relation.DestinationPath -split ':')[-1]
+                }
+                
                 # Try exact match first (most reliable)
-                Write-Log "${Prefix}Debug - Comparing '$($Relation.DestinationVolume)' with '$DatastoreName'" -Level "INFO"
-                if ($Relation.DestinationVolume -eq $DatastoreName) {
-                    Write-Log "${Prefix}Debug - Found exact match: $($Relation.DestinationVolume)" -Level "INFO"
+                Write-Log "${Prefix}Debug - Comparing '$VolumeToCompare' with '$DatastoreName'" -Level "INFO"
+                if ($VolumeToCompare -eq $DatastoreName) {
+                    Write-Log "${Prefix}Debug - Found exact match: $VolumeToCompare" -Level "INFO"
                     $SnapMirrorRelations += $Relation
                     break  # Found exact match, stop looking
                 }
@@ -373,9 +396,15 @@ function Update-SnapMirrorRelationships {
             if ($SnapMirrorRelations.Count -eq 0) {
                 Write-Log "${Prefix}Debug - No exact match found, trying pattern matching..." -Level "INFO"
                 foreach ($Relation in $AllSnapMirrorRelations) {
+                    # Get the volume name - try DestinationVolume first, then extract from DestinationPath
+                    $VolumeToCompare = $Relation.DestinationVolume
+                    if ([string]::IsNullOrEmpty($VolumeToCompare) -and $Relation.DestinationPath) {
+                        $VolumeToCompare = ($Relation.DestinationPath -split ':')[-1]
+                    }
+                    
                     # Only try pattern matching if datastore name is substantial part of volume name
-                    if ($Relation.DestinationVolume -like "*$DatastoreName*" -and $DatastoreName.Length -gt 3) {
-                        Write-Log "${Prefix}Debug - Found pattern match: $($Relation.DestinationVolume)" -Level "INFO"
+                    if ($VolumeToCompare -like "*$DatastoreName*" -and $DatastoreName.Length -gt 3) {
+                        Write-Log "${Prefix}Debug - Found pattern match: $VolumeToCompare" -Level "INFO"
                         $SnapMirrorRelations += $Relation
                         break  # Take first pattern match to avoid duplicates
                     }
