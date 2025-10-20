@@ -481,7 +481,7 @@ function Update-SnapMirrorRelationships {
                     Invoke-NcSnapmirrorBreak -Destination $Destination | Out-Null
                     
                     Write-Log "Successfully processed SnapMirror relationship for volume: $VolumeToProcess" -Level "SUCCESS"
-                }
+                } else {
                     Write-Log "[WHATIF] Would update/quiesce/break SnapMirror relationship for volume: $VolumeToProcess" -Level "INFO"
                 }
                 
