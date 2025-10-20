@@ -567,6 +567,21 @@ function Register-TargetVMs {
     
     Write-Log "Step 5: Registering VMs in target vCenter..." -Level "INFO"
     
+    # AGGRESSIVE WhatIf check at function start
+    if ($WhatIf) {
+        Write-Log "[WHATIF] DETECTED - Running complete simulation mode for all VM registrations" -Level "WARNING"
+        
+        $RegisteredVMs = @()
+        foreach ($VM in $script:MigrationData) {
+            $VMDatastore = $script:VMDatastoreMap[$VM.VMName]
+            Write-Log "[WHATIF] Would register VM: $($VM.VMName) from datastore: ${VMDatastore}" -Level "INFO"
+            $RegisteredVMs += $VM.VMName
+        }
+        
+        Write-Log "Completed VM registration simulation. Would register: $($RegisteredVMs.Count)" -Level "SUCCESS"
+        return $RegisteredVMs
+    }
+    
     # Prompt for confirmation before registering VMs
     if (-not $WhatIf) {
         Write-Host "`nReady to register $($script:MigrationData.Count) VMs in target vCenter." -ForegroundColor Yellow
@@ -602,6 +617,9 @@ function Register-TargetVMs {
                 # Simulate successful registration without any real validation
                 $RegisteredVMs += $VM.VMName
                 Write-Log "[WHATIF] Would successfully register VM: $($VM.VMName)" -Level "SUCCESS"
+                
+                # Explicit continue to next VM - skip all real operations
+                continue
                 
             } else {
                 # Real registration mode
