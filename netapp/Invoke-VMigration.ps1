@@ -356,9 +356,14 @@ function Update-SnapMirrorRelationships {
             
             # Filter relationships for this datastore with more precise matching
             $SnapMirrorRelations = @()
+            Write-Log "${Prefix}Debug - Looking for datastore: '$DatastoreName'" -Level "INFO"
+            Write-Log "${Prefix}Debug - Available destination volumes: $($AllSnapMirrorRelations.DestinationVolume -join ', ')" -Level "INFO"
+            
             foreach ($Relation in $AllSnapMirrorRelations) {
                 # Try exact match first (most reliable)
+                Write-Log "${Prefix}Debug - Comparing '$($Relation.DestinationVolume)' with '$DatastoreName'" -Level "INFO"
                 if ($Relation.DestinationVolume -eq $DatastoreName) {
+                    Write-Log "${Prefix}Debug - Found exact match: $($Relation.DestinationVolume)" -Level "INFO"
                     $SnapMirrorRelations += $Relation
                     break  # Found exact match, stop looking
                 }
@@ -366,9 +371,11 @@ function Update-SnapMirrorRelationships {
             
             # If no exact match, try pattern matching but be more restrictive
             if ($SnapMirrorRelations.Count -eq 0) {
+                Write-Log "${Prefix}Debug - No exact match found, trying pattern matching..." -Level "INFO"
                 foreach ($Relation in $AllSnapMirrorRelations) {
                     # Only try pattern matching if datastore name is substantial part of volume name
                     if ($Relation.DestinationVolume -like "*$DatastoreName*" -and $DatastoreName.Length -gt 3) {
+                        Write-Log "${Prefix}Debug - Found pattern match: $($Relation.DestinationVolume)" -Level "INFO"
                         $SnapMirrorRelations += $Relation
                         break  # Take first pattern match to avoid duplicates
                     }
@@ -376,11 +383,12 @@ function Update-SnapMirrorRelationships {
             }
             
             $Prefix = if ($WhatIf) { "[WHATIF] " } else { "" }
-            Write-Log "${Prefix}Found $($AllSnapMirrorRelations.Count) total SnapMirror relationships, $($SnapMirrorRelations.Count) matching datastore: ${DatastoreName}" -Level "INFO"
+            Write-Log "${Prefix}Found $($AllSnapMirrorRelations.Count) total SnapMirror relationships, $($SnapMirrorRelations.Count) matching datastore: $DatastoreName" -Level "INFO"
             
             if ($SnapMirrorRelations.Count -eq 0) {
-                Write-Log "${Prefix}No SnapMirror relationships found for datastore: ${DatastoreName}" -Level "WARNING"
+                Write-Log "${Prefix}No SnapMirror relationships found for datastore: $DatastoreName" -Level "WARNING"
                 Write-Log "${Prefix}Available destination volumes: $($AllSnapMirrorRelations.DestinationVolume -join ', ')" -Level "INFO"
+                Write-Log "${Prefix}Debug - Exact datastore name: '$DatastoreName' (Length: $($DatastoreName.Length))" -Level "INFO"
                 continue
             }
             
