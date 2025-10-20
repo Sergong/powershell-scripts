@@ -583,9 +583,10 @@ function Register-TargetVMs {
     
     foreach ($VM in $script:MigrationData) {
         try {
+            $VMDatastore = $script:VMDatastoreMap[$VM.VMName]
+            
             if (-not $WhatIf) {
-                # Get the discovered datastore for this VM
-                $VMDatastore = $script:VMDatastoreMap[$VM.VMName]
+                # Real registration - verify datastore exists and register VM
                 $Datastore = Get-Datastore -Server $script:TargetVIServer -Name $VMDatastore -ErrorAction Stop
                 $VMXPath = "[${VMDatastore}] $($VM.VMName)/$($VM.VMName).vmx"
                 
@@ -603,12 +604,33 @@ function Register-TargetVMs {
                 $RegisteredVMs += $VM.VMName
                 Write-Log "Successfully registered VM: $($VM.VMName)" -Level "SUCCESS"
             } else {
-                $VMDatastore = $script:VMDatastoreMap[$VM.VMName]
-                Write-Log "[WHATIF] Would register VM: $($VM.VMName) from datastore: ${VMDatastore}" -Level "INFO"
+                # WhatIf simulation - don't attempt actual operations
+                $VMXPath = "[${VMDatastore}] $($VM.VMName)/$($VM.VMName).vmx"
+                
+                # Simulate cluster and host selection for logging
+                try {
+                    $Cluster = Get-Cluster -Server $script:TargetVIServer -Name $TargetCluster -ErrorAction Stop
+                    $TargetHost = Get-VMHost -Location $Cluster -Server $script:TargetVIServer | Select-Object -First 1
+                    
+                    Write-Log "[WHATIF] Would register VM: $($VM.VMName) from datastore: ${VMDatastore}" -Level "INFO"
+                    Write-Log "[WHATIF] Would use path: ${VMXPath}" -Level "INFO"
+                    Write-Log "[WHATIF] Would register to cluster: ${TargetCluster}, host: $($TargetHost.Name)" -Level "INFO"
+                    
+                    # Simulate successful registration
+                    $RegisteredVMs += $VM.VMName
+                    Write-Log "[WHATIF] Would successfully register VM: $($VM.VMName)" -Level "SUCCESS"
+                }
+                catch {
+                    Write-Log "[WHATIF] ERROR: Could not validate cluster ${TargetCluster} for VM registration simulation" -Level "ERROR"
+                }
             }
         }
         catch {
-            Write-Log "Failed to register VM $($VM.VMName): ${_}" -Level "ERROR"
+            if (-not $WhatIf) {
+                Write-Log "Failed to register VM $($VM.VMName): ${_}" -Level "ERROR"
+            } else {
+                Write-Log "[WHATIF] Simulation error for VM $($VM.VMName): ${_}" -Level "WARNING"
+            }
         }
     }
     
@@ -638,7 +660,7 @@ function Start-TargetVMs {
         
         try {
             if (-not $WhatIf) {
-                # Individual confirmation for each VM
+                # Real VM startup with individual confirmation
                 Write-Host "VM $CurrentVM of ${VMCount}: $($VM.VMName)" -ForegroundColor White -BackgroundColor DarkBlue
                 $Confirmation = Read-Host "Power on VM '$($VM.VMName)' now? (y/N/s=skip)"
                 
@@ -650,6 +672,7 @@ function Start-TargetVMs {
                     break
                 }
                 
+                # Attempt to get VM (should exist after registration)
                 $VMObject = Get-VM -Server $script:TargetVIServer -Name $VM.VMName -ErrorAction Stop
                 
                 Write-Log "Powering on VM $CurrentVM of ${VMCount}: $($VM.VMName)" -Level "INFO"
@@ -689,8 +712,15 @@ function Start-TargetVMs {
                 }
                 
             } else {
+                # WhatIf simulation - don't attempt VM operations
                 Write-Log "[WHATIF] Would prompt to power on VM $CurrentVM of ${VMCount}: $($VM.VMName)" -Level "INFO"
+                Write-Log "[WHATIF] Would wait for VM startup and check for relocation questions" -Level "INFO"
+                Write-Log "[WHATIF] Would answer relocation question with 'I moved it' if prompted" -Level "INFO"
+                Write-Log "[WHATIF] Would verify VM reaches PoweredOn state" -Level "INFO"
+                
+                # Simulate successful startup
                 $StartedVMs += $VM.VMName
+                Write-Log "[WHATIF] Would successfully start VM $CurrentVM of ${VMCount}: $($VM.VMName)" -Level "SUCCESS"
             }
         }
         catch {
@@ -741,17 +771,29 @@ function Add-BackupTags {
         foreach ($VM in $script:MigrationData) {
             try {
                 if (-not $WhatIf) {
+                    # Real tagging - get VM and apply tag
                     $VMObject = Get-VM -Server $script:TargetVIServer -Name $VM.VMName -ErrorAction Stop
                     New-TagAssignment -Tag $BackupTag -Entity $VMObject | Out-Null
                     
                     $TaggedVMs += $VM.VMName
                     Write-Log "Applied backup tag '${BackupTier}' to VM: $($VM.VMName)" -Level "SUCCESS"
                 } else {
+                    # WhatIf simulation - don't attempt VM operations
+                    Write-Log "[WHATIF] Would create backup tag category 'Backup' if needed" -Level "INFO"
+                    Write-Log "[WHATIF] Would create backup tag '${BackupTier}' if needed" -Level "INFO"
                     Write-Log "[WHATIF] Would apply backup tag '${BackupTier}' to VM: $($VM.VMName)" -Level "INFO"
+                    
+                    # Simulate successful tagging
+                    $TaggedVMs += $VM.VMName
+                    Write-Log "[WHATIF] Would successfully tag VM: $($VM.VMName)" -Level "SUCCESS"
                 }
             }
             catch {
-                Write-Log "Failed to tag VM $($VM.VMName): ${_}" -Level "ERROR"
+                if (-not $WhatIf) {
+                    Write-Log "Failed to tag VM $($VM.VMName): ${_}" -Level "ERROR"
+                } else {
+                    Write-Log "[WHATIF] Simulation warning for VM tagging $($VM.VMName): ${_}" -Level "WARNING"
+                }
             }
         }
     }
@@ -876,15 +918,15 @@ function Write-MigrationSummary {
     
     $TotalVMs = $script:MigrationData.Count
     
-    Write-Log "`n" + "="*80 -Level "INFO"
+    Write-Log ("`n" + "="*80) -Level "INFO"
     Write-Log "VM MIGRATION SUMMARY" -Level "INFO" 
-    Write-Log "="*80 -Level "INFO"
+    Write-Log ("="*80) -Level "INFO"
     Write-Log "Total VMs to migrate: ${TotalVMs}" -Level "INFO"
     Write-Log "Errors encountered: $($script:ErrorCount)" -Level "INFO"
     Write-Log "Warnings encountered: $($script:WarningCount)" -Level "INFO"
     Write-Log "Log file location: $($script:LogFile)" -Level "INFO"
     Write-Log "Migration completed at: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -Level "INFO"
-    Write-Log "="*80 -Level "INFO"
+    Write-Log ("="*80) -Level "INFO"
     
     if ($script:ErrorCount -eq 0) {
         Write-Log "MIGRATION COMPLETED SUCCESSFULLY!" -Level "SUCCESS"
