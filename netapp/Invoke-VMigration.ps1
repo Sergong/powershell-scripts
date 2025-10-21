@@ -863,36 +863,64 @@ function Start-TargetVMs {
                 # Attempt to get VM (should exist after registration)
                 $VMObject = Get-VM -Server $script:TargetVIServer -Name $VM.VMName -ErrorAction Stop
                 
-                Write-Log "Powering on VM $CurrentVM of ${VMCount}: $($VM.VMName)" -Level "INFO"
-                Start-VM -VM $VMObject -Confirm:$false | Out-Null
-                
-                # Wait for VM to start and check for questions
-                Write-Host "  Waiting for VM to start..." -ForegroundColor Gray
-                Start-Sleep -Seconds 5
-                
-                # Check for and answer VM questions (I moved it)
+                # Check for questions BEFORE starting the VM (some VMs have questions that block power-on)
+                Write-Log "Checking for VM questions before power-on: $($VM.VMName)" -Level "INFO"
                 $VMView = Get-View -VIObject $VMObject
                 if ($VMView.Runtime.Question) {
                     $Question = $VMView.Runtime.Question
-                    Write-Log "VM question detected for $($VM.VMName): $($Question.Text)" -Level "INFO"
-                    Write-Host "  Answering relocation question..." -ForegroundColor Gray
+                    Write-Log "VM question detected BEFORE power-on for $($VM.VMName): $($Question.Text)" -Level "INFO"
+                    Write-Host "  Answering relocation question before power-on..." -ForegroundColor Gray
                     
                     try {
-                        # vSphere 8 compatible approach - try multiple methods
-                        if ($Question.Choice -and $Question.Choice.ChoiceInfo) {
-                            # Method 1: Use the first choice key (typically "I moved it")
-                            $AnswerKey = $Question.Choice.ChoiceInfo[0].Key
-                            Write-Log "Using answer key: $AnswerKey for question: $($Question.Text)" -Level "INFO"
+                        # Answer with choice index 1 ("I moved it") - corrected from 0
+                        if ($Question.Choice -and $Question.Choice.ChoiceInfo -and $Question.Choice.ChoiceInfo.Count -gt 1) {
+                            # Method 1: Use the second choice key (index 1 = "I moved it")
+                            $AnswerKey = $Question.Choice.ChoiceInfo[1].Key
+                            Write-Log "Using answer key: $AnswerKey (choice 1 - I moved it) for question: $($Question.Text)" -Level "INFO"
                             $VMView.AnswerVM($Question.Id, $AnswerKey)
                         } else {
-                            # Method 2: Try with default answer index
-                            Write-Log "Using default answer index 0 for question: $($Question.Text)" -Level "INFO"
-                            $VMView.AnswerVM($Question.Id, 0)
+                            # Method 2: Use index 1 directly ("I moved it")
+                            Write-Log "Using answer index 1 (I moved it) for question: $($Question.Text)" -Level "INFO"
+                            $VMView.AnswerVM($Question.Id, 1)
                         }
-                        Write-Log "Successfully answered VM question for $($VM.VMName)" -Level "SUCCESS"
+                        Write-Log "Successfully answered VM question for $($VM.VMName) before power-on" -Level "SUCCESS"
+                        
+                        # Brief pause to let the answer take effect
+                        Start-Sleep -Seconds 2
                     } catch {
                         Write-Log "Failed to answer VM question for $($VM.VMName): $($_.Exception.Message)" -Level "WARNING"
                         Write-Host "  Warning: Could not answer VM question automatically" -ForegroundColor Yellow
+                    }
+                }
+                
+                Write-Log "Powering on VM $CurrentVM of ${VMCount}: $($VM.VMName)" -Level "INFO"
+                Start-VM -VM $VMObject -Confirm:$false | Out-Null
+                
+                # Wait for VM to start and check for any additional questions
+                Write-Host "  Waiting for VM to start..." -ForegroundColor Gray
+                Start-Sleep -Seconds 5
+                
+                # Check for any additional questions after power-on
+                $VMView = Get-View -VIObject $VMObject
+                if ($VMView.Runtime.Question) {
+                    $Question = $VMView.Runtime.Question
+                    Write-Log "Additional VM question detected AFTER power-on for $($VM.VMName): $($Question.Text)" -Level "INFO"
+                    Write-Host "  Answering additional relocation question..." -ForegroundColor Gray
+                    
+                    try {
+                        # Answer with choice index 1 ("I moved it") for any additional questions
+                        if ($Question.Choice -and $Question.Choice.ChoiceInfo -and $Question.Choice.ChoiceInfo.Count -gt 1) {
+                            $AnswerKey = $Question.Choice.ChoiceInfo[1].Key
+                            Write-Log "Using answer key: $AnswerKey (choice 1 - I moved it) for additional question: $($Question.Text)" -Level "INFO"
+                            $VMView.AnswerVM($Question.Id, $AnswerKey)
+                        } else {
+                            Write-Log "Using answer index 1 (I moved it) for additional question: $($Question.Text)" -Level "INFO"
+                            $VMView.AnswerVM($Question.Id, 1)
+                        }
+                        Write-Log "Successfully answered additional VM question for $($VM.VMName)" -Level "SUCCESS"
+                    } catch {
+                        Write-Log "Failed to answer additional VM question for $($VM.VMName): $($_.Exception.Message)" -Level "WARNING"
+                        Write-Host "  Warning: Could not answer additional VM question automatically" -ForegroundColor Yellow
                     }
                 }
                 
