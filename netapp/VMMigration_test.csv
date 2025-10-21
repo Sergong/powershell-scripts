@@ -1,4 +1,4 @@
-VMName
-Clone_dc1-sip1
-Clone_dc1-sip4
-Clone_dc1-sip98
+VMName,PortGroup
+Clone_dc1-sip1,PG_Voice_Servers
+Clone_dc1-sip4,PG_Voice_Servers
+Clone_dc1-sip98,PG_Voice_Servers

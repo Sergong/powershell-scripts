@@ -161,7 +161,7 @@ function Test-Prerequisites {
     # Test CSV file format
     try {
         $TestCSV = Import-Csv -Path $CSVPath
-        $RequiredColumns = @('VMName')
+        $RequiredColumns = @('VMName', 'PortGroup')
         
         $CSVColumns = $TestCSV | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name
         
@@ -747,6 +747,82 @@ function Register-TargetVMs {
     return $RegisteredVMs
 }
 
+function Configure-VMPortGroups {
+    [CmdletBinding()]
+    param()
+    
+    Write-Log "Step 5.5: Configuring VM network port groups..." -Level "INFO"
+    
+    $ConfiguredVMs = @()
+    
+    foreach ($VM in $script:MigrationData) {
+        try {
+            $TargetPortGroup = $VM.PortGroup
+            
+            if (-not $TargetPortGroup) {
+                Write-Log "No port group specified for VM: $($VM.VMName), skipping network configuration" -Level "WARNING"
+                continue
+            }
+            
+            if (-not $WhatIf) {
+                # Get the VM object
+                $VMObject = Get-VM -Server $script:TargetVIServer -Name $VM.VMName -ErrorAction Stop
+                
+                # Get all network adapters for the VM
+                $NetworkAdapters = Get-NetworkAdapter -VM $VMObject -Server $script:TargetVIServer
+                
+                Write-Log "Checking port group configuration for VM: $($VM.VMName) (Target: $TargetPortGroup)" -Level "INFO"
+                
+                $ChangesMade = $false
+                foreach ($Adapter in $NetworkAdapters) {
+                    $CurrentPortGroup = $Adapter.NetworkName
+                    
+                    if ($CurrentPortGroup -ne $TargetPortGroup) {
+                        Write-Log "VM: $($VM.VMName), Adapter: $($Adapter.Name) - Current: '$CurrentPortGroup' -> Target: '$TargetPortGroup'" -Level "INFO"
+                        
+                        # Verify target port group exists
+                        $PortGroupExists = Get-VirtualPortGroup -Server $script:TargetVIServer -Name $TargetPortGroup -ErrorAction SilentlyContinue
+                        if (-not $PortGroupExists) {
+                            Write-Log "Port group '$TargetPortGroup' does not exist in target environment for VM: $($VM.VMName)" -Level "ERROR"
+                            continue
+                        }
+                        
+                        # Change the port group
+                        Set-NetworkAdapter -NetworkAdapter $Adapter -PortGroup $PortGroupExists -Confirm:$false | Out-Null
+                        Write-Log "Changed adapter '$($Adapter.Name)' from '$CurrentPortGroup' to '$TargetPortGroup' for VM: $($VM.VMName)" -Level "SUCCESS"
+                        $ChangesMade = $true
+                    } else {
+                        Write-Log "VM: $($VM.VMName), Adapter: $($Adapter.Name) already on correct port group: '$CurrentPortGroup'" -Level "INFO"
+                    }
+                }
+                
+                if ($ChangesMade) {
+                    $ConfiguredVMs += $VM.VMName
+                    Write-Log "Network configuration completed for VM: $($VM.VMName)" -Level "SUCCESS"
+                } else {
+                    Write-Log "No network changes needed for VM: $($VM.VMName)" -Level "INFO"
+                }
+                
+            } else {
+                # WhatIf simulation
+                Write-Log "[WHATIF] Would check current port group for VM: $($VM.VMName)" -Level "INFO"
+                Write-Log "[WHATIF] Would change to port group '$TargetPortGroup' if different" -Level "INFO"
+                Write-Log "[WHATIF] Would verify port group '$TargetPortGroup' exists in target environment" -Level "INFO"
+                
+                # Simulate successful configuration
+                $ConfiguredVMs += $VM.VMName
+                Write-Log "[WHATIF] Would complete network configuration for VM: $($VM.VMName)" -Level "SUCCESS"
+            }
+        }
+        catch {
+            Write-Log "Failed to configure port group for VM $($VM.VMName): ${_}" -Level "ERROR"
+        }
+    }
+    
+    Write-Log "Completed network port group configuration. VMs processed: $($ConfiguredVMs.Count)" -Level "SUCCESS"
+    return $ConfiguredVMs
+}
+
 
 function Start-TargetVMs {
     [CmdletBinding()]
@@ -881,9 +957,9 @@ function Add-BackupTags {
     try {
         if (-not $WhatIf) {
             # Create backup tag category if it doesn't exist
-            $TagCategory = Get-TagCategory -Name "Backup" -ErrorAction SilentlyContinue
+            $TagCategory = Get-TagCategory -Name "Veeam" -ErrorAction SilentlyContinue
             if (-not $TagCategory) {
-                $TagCategory = New-TagCategory -Name "Backup" -Cardinality Single -EntityType VirtualMachine
+                $TagCategory = New-TagCategory -Name "Veeam" -Cardinality Single -EntityType VirtualMachine
                 Write-Log "Created backup tag category" -Level "INFO"
             }
             
@@ -1104,6 +1180,7 @@ try {
     $ProcessedVolumes = Update-SnapMirrorRelationships -Datastores $Datastores
     $MountedDatastores = Mount-TargetDatastores -Datastores $Datastores
     $RegisteredVMs = Register-TargetVMs
+    $ConfiguredVMs = Configure-VMPortGroups
     $StartedVMs = Start-TargetVMs
     $TaggedVMs = Add-BackupTags
     $DisconnectedVMs = Disconnect-SourceVMNetworks
