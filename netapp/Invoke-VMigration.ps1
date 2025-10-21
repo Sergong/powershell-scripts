@@ -780,15 +780,18 @@ function Configure-VMPortGroups {
                     if ($CurrentPortGroup -ne $TargetPortGroup) {
                         Write-Log "VM: $($VM.VMName), Adapter: $($Adapter.Name) - Current: '$CurrentPortGroup' -> Target: '$TargetPortGroup'" -Level "INFO"
                         
-                        # Verify target port group exists
-                        $PortGroupExists = Get-VirtualPortGroup -Server $script:TargetVIServer -Name $TargetPortGroup -ErrorAction SilentlyContinue
-                        if (-not $PortGroupExists) {
+                        # Verify target port group exists and get the correct object
+                        $PortGroupObjects = Get-VirtualPortGroup -Server $script:TargetVIServer -Name $TargetPortGroup -ErrorAction SilentlyContinue
+                        if (-not $PortGroupObjects) {
                             Write-Log "Port group '$TargetPortGroup' does not exist in target environment for VM: $($VM.VMName)" -Level "ERROR"
                             continue
                         }
                         
-                        # Change the port group
-                        Set-NetworkAdapter -NetworkAdapter $Adapter -PortGroup $PortGroupExists -Confirm:$false | Out-Null
+                        # Select the first matching port group (in case of multiple matches)
+                        $PortGroupToUse = $PortGroupObjects | Select-Object -First 1
+                        
+                        # Change the port group using the NetworkName parameter
+                        Set-NetworkAdapter -NetworkAdapter $Adapter -NetworkName $TargetPortGroup -Confirm:$false | Out-Null
                         Write-Log "Changed adapter '$($Adapter.Name)' from '$CurrentPortGroup' to '$TargetPortGroup' for VM: $($VM.VMName)" -Level "SUCCESS"
                         $ChangesMade = $true
                     } else {
