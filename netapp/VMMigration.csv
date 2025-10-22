@@ -23,3 +23,4 @@ DC1-IPBX2,PG_Voice_Servers
 dc1-spn-cweb1,PG_Voice_Servers
 dc1-spn-cweb2,PG_Voice_Servers
 dc1-spn-hweb1,PG_Voice_Servers
+SS1-WSHK-P-01,PG_DC1_Infrastructure1
